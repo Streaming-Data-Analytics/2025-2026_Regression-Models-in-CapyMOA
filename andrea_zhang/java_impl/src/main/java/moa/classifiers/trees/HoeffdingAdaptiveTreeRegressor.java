@@ -143,7 +143,17 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
     public void getModelDescription(StringBuilder out, int indent) {}
 
     @Override
-    public void trainOnInstanceImpl(Instance inst) {}
+    public void trainOnInstanceImpl(Instance inst) {
+        trainWeightSeen += inst.weight();
+        if (root == null) {
+		root = newLeaf(null, 0);
+		nActiveLeaves = 1;
+	}
+        root.learn(inst, this, null, -1);
+        if ((long) trainWeightSeen % memoryEstimatePeriodOption.getValue() == 0) {
+                estimateModelSize();
+	}
+    }
 
     @Override
     public double[] getVotesForInstance(Instance inst) {
@@ -155,10 +165,41 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         return new Measurement[]{};
     }
 
+    private void estimateModelSize() {}
+
+    protected LeafNode newLeaf(Node parent, int depth) {
+        return new AdaLeafNode(parent, depth);
+    }
+
+
     //endregion === METHODS ===
 
     //region === CLASSES ===
-    public abstract class Node {}
+    public abstract class Node {
+        public abstract void learn(
+                Instance inst, 
+                HoeffdingAdaptiveTreeRegressor tree, 
+                Node parent, 
+                int parentBranch
+        );
+    }
+
+    public abstract class LeafNode extends Node {}
+
+    public abstract class SplitNode extends Node {}
+
+    public class AdaLeafNode extends LeafNode {
+        public AdaLeafNode(Node parent, int depth) {}
+
+        @Override
+        public void learn(
+                Instance inst, 
+                HoeffdingAdaptiveTreeRegressor tree, 
+                Node parent, 
+                int parentBranch
+        ){}
+
+    }
 
     //endregion === CLASSES ===
     
