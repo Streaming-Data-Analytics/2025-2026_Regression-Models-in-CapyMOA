@@ -1,5 +1,7 @@
 package moa.classifiers.trees;
 
+import com.yahoo.labs.samoa.instances.Instance;
+
 import com.github.javacliparser.IntOption;
 import com.github.javacliparser.FlagOption;
 import com.github.javacliparser.FloatOption;
@@ -7,6 +9,7 @@ import com.github.javacliparser.MultiChoiceOption;
 
 import moa.classifiers.AbstractClassifier;
 import moa.classifiers.Regressor;
+import moa.core.Measurement;
 
 import org.apache.commons.math3.distribution.NormalDistribution;
 
@@ -128,9 +131,34 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         return Math.sqrt((range * range * Math.log(1.0 / confidence)) / (2.0 * n));
     }
 
+    @Override
+    public void resetLearningImpl() {}
+
+    @Override
+    public boolean isRandomizable() {
+        return true; // MOA will manage classifierRandom and randomSeed
+    }
+
+    @Override
+    public void getModelDescription(StringBuilder out, int indent) {}
+
+    @Override
+    public void trainOnInstanceImpl(Instance inst) {}
+
+    @Override
+    public double[] getVotesForInstance(Instance inst) {
+        return new double[]{};
+    }
+
+    @Override
+    protected Measurement[] getModelMeasurementsImpl() {
+        return new Measurement[]{};
+    }
+
     //endregion === METHODS ===
 
     //region === CLASSES ===
+    public abstract class Node {}
 
     //endregion === CLASSES ===
     
