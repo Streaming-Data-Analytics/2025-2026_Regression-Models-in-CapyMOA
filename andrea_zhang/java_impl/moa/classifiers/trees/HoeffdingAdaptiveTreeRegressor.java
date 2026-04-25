@@ -8,6 +8,8 @@ import com.github.javacliparser.MultiChoiceOption;
 import moa.classifiers.AbstractClassifier;
 import moa.classifiers.Regressor;
 
+import org.apache.commons.math3.distribution.NormalDistribution;
+
 public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implements Regressor {
     private static final long serialVersionUID = 1L;
 
@@ -95,6 +97,28 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
             5, 1, Integer.MAX_VALUE);
     
     // splitter ??
+
+    // all parameters in River's HoeffdingAdptiveTreeRegressor
+
+    public FlagOption bootstrapSamplingOption = new FlagOption(
+            "bootstrapSampling", 'b',
+            "Enable Poisson bootstrap sampling at leaves (default: on).");
+    
+    public IntOption driftWindowThresholdOption = new IntOption(
+            "driftWindowThreshold", 'w',
+            "Minimum examples an alternate tree must observe before being considered for replacement.",
+            300, 1, Integer.MAX_VALUE);
+    
+    // drift detector ??
+
+    public FloatOption switchSignificanceOption = new FloatOption(
+            "switchSignificance", 'z',
+            "Significance level (p-value threshold) for the z-test when swapping alternate trees.",
+            0.05, 0.0, 1.0);
+
+    // seed ??
+
+    private static final NormalDistribution NORM = new NormalDistribution();
 
     //endregion === OPTIONS ===
 
