@@ -2,6 +2,8 @@ package moa.classifiers.trees;
 
 import com.github.javacliparser.IntOption;
 import com.github.javacliparser.FlagOption;
+import com.github.javacliparser.FloatOption;
+import com.github.javacliparser.MultiChoiceOption;
 
 import moa.classifiers.AbstractClassifier;
 import moa.classifiers.Regressor;
@@ -49,11 +51,52 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
             "meritPreprune", 'u',
             "Enable merit-based pre-pruning: deactivate leaf when no split candidate has positive merit.");
     
+    // all parameters in River's HoeffdingTreeRegressor
+    
+    public IntOption gracePeriodOption = new IntOption(
+            "gracePeriod", 'g',
+            "Number of instances a leaf should observe between split attempts.",
+            200, 1, Integer.MAX_VALUE);
+    
+    public FloatOption deltaOption = new FloatOption(
+            "delta", 'c',
+            "Significance level for the Hoeffding bound (1 - delta = confidence).",
+            1e-7, 0.0, 1.0);
+    
+    public FloatOption tauOption = new FloatOption(
+            "tau", 't',
+            "Threshold below which a split will be forced to break ties.",
+            0.05, 0.0, 1.0);
+    
+    public MultiChoiceOption leafPredictionOption = new MultiChoiceOption(
+            "leafPrediction", 'l',
+            "Prediction strategy used at leaves.",
+            new String[]{"MEAN", "MODEL", "ADAPTIVE"},
+            new String[]{
+                "Target mean",
+                "Linear regression model",
+                "Adaptive: chooses between MEAN and MODEL via FMSE tracking"
+            }, 2); // default: ADAPTIVE
+    
+    public enum LeafPrediction { MEAN, MODEL, ADAPTIVE }
+
+    // no leaf model, è un LinearRegressor all'interno di questa classe 
+
+    public FloatOption modelSelectorDecayOption = new FloatOption(
+            "modelSelectorDecay", 'q',
+            "Exponential decay factor for FMSE tracking in ADAPTIVE leaf mode.",
+            0.95, 0.0, 1.0);
+    
+    // lista nominal attributes ??
+
+    public IntOption minSamplesSplitOption = new IntOption(
+            "minSamplesSplit", 'm',
+            "Minimum number of samples each branch resulting from a split must have.",
+            5, 1, Integer.MAX_VALUE);
+    
+    // splitter ??
+
     //endregion === OPTIONS ===
-
-    //region === CLASSES ===
-
-    //endregion === CLASSES ===
 
     //region === METHODS ===
 
@@ -62,5 +105,9 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
     }
 
     //endregion === METHODS ===
+
+    //region === CLASSES ===
+
+    //endregion === CLASSES ===
     
 }
