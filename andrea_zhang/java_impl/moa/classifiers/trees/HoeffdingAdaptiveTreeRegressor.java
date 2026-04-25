@@ -54,5 +54,13 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
     //region === CLASSES ===
 
     //endregion === CLASSES ===
+
+    //region === METHODS ===
+
+    public static double hoeffdingBound(double range, double confidence, double n) {
+        return Math.sqrt((range * range * Math.log(1.0 / confidence)) / (2.0 * n));
+    }
+
+    //endregion === METHODS ===
     
 }
