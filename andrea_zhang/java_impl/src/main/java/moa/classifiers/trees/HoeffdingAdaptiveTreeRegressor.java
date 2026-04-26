@@ -135,7 +135,16 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
     }
 
     @Override
-    public void resetLearningImpl() {}
+    public void resetLearningImpl() {
+        root                 = null;
+        trainWeightSeen      = 0;
+        nActiveLeaves        = 0;
+        nInactiveLeaves      = 0;
+        growthAllowed             = true;
+        sizeEstimateOverhead      = 1.0;
+        activeLeafSizeEstimate    = 0.0;
+        inactiveLeafSizeEstimate  = 0.0;
+    }
 
     @Override
     public boolean isRandomizable() {
@@ -143,7 +152,12 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
     }
 
     @Override
-    public void getModelDescription(StringBuilder out, int indent) {}
+    public void getModelDescription(StringBuilder out, int indent) {
+        out.append("HoeffdingAdaptiveTreeRegressor\n");
+        out.append("  active leaves   : ").append(nActiveLeaves).append("\n");
+        out.append("  inactive leaves : ").append(nInactiveLeaves).append("\n");
+        out.append("  instances seen  : ").append((long) trainWeightSeen).append("\n");
+    }
 
     @Override
     public void trainOnInstanceImpl(Instance inst) {
