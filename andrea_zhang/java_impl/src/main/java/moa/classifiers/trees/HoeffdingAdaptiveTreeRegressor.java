@@ -85,8 +85,6 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
                 "Linear regression model",
                 "Adaptive: chooses between MEAN and MODEL via FMSE tracking"
             }, 2); // default: ADAPTIVE
-    
-    public enum LeafPrediction { MEAN, MODEL, ADAPTIVE }
 
     // no leaf model, è un LinearRegressor all'interno di questa classe 
 
@@ -136,14 +134,14 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
     @Override
     public void resetLearningImpl() {
-        root                 = null;
-        trainWeightSeen      = 0;
-        nActiveLeaves        = 0;
-        nInactiveLeaves      = 0;
-        growthAllowed             = true;
-        sizeEstimateOverhead      = 1.0;
-        activeLeafSizeEstimate    = 0.0;
-        inactiveLeafSizeEstimate  = 0.0;
+        root = null;
+        trainWeightSeen = 0;
+        nActiveLeaves = 0;
+        nInactiveLeaves = 0;
+        growthAllowed = true;
+        sizeEstimateOverhead = 1.0;
+        activeLeafSizeEstimate = 0.0;
+        inactiveLeafSizeEstimate = 0.0;
     }
 
     @Override
@@ -191,9 +189,19 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
     private void estimateModelSize() {}
 
     protected LeafNode newLeaf(Node parent, int depth) {
-        return new AdaLeafNode(parent, depth);
+        switch (leafPredictionOption.getChosenIndex()) {
+            case 0:  return new AdaLeafMean();
+            case 1: return new AdaLeafModel();
+            default:    return new AdaLeafAdaptive();
+        }
     }
 
+    private static int poisson(double rate, java.util.Random rng) {
+        double L = Math.exp(-rate);
+        int k = 0; double p = 1.0;
+        do { k++; p *= rng.nextDouble(); } while (p > L);
+        return k - 1;
+    }
 
     //endregion === METHODS ===
 
@@ -215,42 +223,79 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         );
     }
 
-    public abstract class LeafNode extends Node {}
+    public abstract class LeafNode extends Node {
+        @Override
+        public final void learn(Instance inst, HoeffdingAdaptiveTreeRegressor tree, Node parent, int parentBranch) {
+                double y = inst.classValue();
+                double y_pred = predict(inst, tree);
+                
+                // bootstrap sampling 
+                double w = inst.weight();
+                if (tree.bootstrapSamplingOption.isSet()) {
+                        int k = poisson(1.0, tree.classifierRandom);
+                        if (k > 0) w *= k;
+                }
+
+        }
+
+        public double getMean() {
+                return 0.0;
+        }
+
+    }
 
     public abstract class SplitNode extends Node {}
 
-    public class AdaLeafNode extends LeafNode {
-        public AdaLeafNode(Node parent, int depth) {}
+    public class AdaLeafMean extends LeafNode {
 
         @Override
-        public void learn(
-                Instance inst, 
-                HoeffdingAdaptiveTreeRegressor tree, 
-                Node parent, 
-                int parentBranch
-        ){
-                // TODO Auto-generated method stub
-                throw new UnsupportedOperationException("Unimplemented method 'learn'");
-        }
-
-        @Override
-        public void collectLeaves(
-                Instance inst, 
-                List<Node> result
-        ) {
+        public void collectLeaves(Instance inst, List<Node> result) {
                 // TODO Auto-generated method stub
                 throw new UnsupportedOperationException("Unimplemented method 'collectLeaves'");
         }
 
         @Override
-        public double predict(
-                Instance inst, 
-                HoeffdingAdaptiveTreeRegressor tree
-        ) {
+        public double predict(Instance inst, HoeffdingAdaptiveTreeRegressor tree) {
+                return getMean();
+        }
+        
+    }
+
+    public class AdaLeafModel extends LeafNode {
+
+        private LinearModel leafModel;
+
+        @Override
+        public void collectLeaves(Instance inst, List<Node> result) {
                 // TODO Auto-generated method stub
-                throw new UnsupportedOperationException("Unimplemented method 'predict'");
+                throw new UnsupportedOperationException("Unimplemented method 'collectLeaves'");
         }
 
+        @Override
+        public double predict(Instance inst, HoeffdingAdaptiveTreeRegressor tree) {
+                return leafModel.predict(inst);
+        }
+        
+    }
+
+    public class AdaLeafAdaptive extends LeafNode {
+
+        private LinearModel leafModel;
+        private double fmseMean  = 0.0;
+        private double fmseModel = 0.0;
+
+        @Override
+        public void collectLeaves(Instance inst, List<Node> result) {
+                // TODO Auto-generated method stub
+                throw new UnsupportedOperationException("Unimplemented method 'collectLeaves'");
+        }
+
+        @Override
+        public double predict(Instance inst, HoeffdingAdaptiveTreeRegressor tree) {
+                if (fmseMean < fmseModel) return getMean();
+                return leafModel.predict(inst);
+        }
+        
     }
 
     public class AdaSplitNode extends SplitNode {
@@ -269,6 +314,15 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
         @Override
         public double predict(Instance inst, HoeffdingAdaptiveTreeRegressor tree) {
+                // TODO Auto-generated method stub
+                throw new UnsupportedOperationException("Unimplemented method 'predict'");
+        }
+        
+    }
+
+    public static class LinearModel {
+
+        public double predict(Instance inst) {
                 // TODO Auto-generated method stub
                 throw new UnsupportedOperationException("Unimplemented method 'predict'");
         }
