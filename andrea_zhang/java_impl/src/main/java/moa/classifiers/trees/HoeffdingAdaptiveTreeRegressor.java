@@ -11,6 +11,9 @@ import moa.classifiers.AbstractClassifier;
 import moa.classifiers.Regressor;
 import moa.core.Measurement;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import org.apache.commons.math3.distribution.NormalDistribution;
 
 public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implements Regressor {
@@ -156,8 +159,14 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
     }
 
     @Override
-    public double[] getVotesForInstance(Instance inst) {
-        return new double[]{};
+    public double[] getVotesForInstance(Instance inst) { // multi path, main + alternate 
+        if (root == null) return new double[]{0.0};
+        List<Node> leaves = new ArrayList<>();
+        root.collectLeaves(inst, leaves);
+        if (leaves.isEmpty()) return new double[]{0.0};
+        double sum = 0;
+        for (Node leaf : leaves) sum += leaf.predict(inst, this);
+        return new double[]{sum / leaves.size()};
     }
 
     @Override
@@ -182,6 +191,14 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
                 Node parent, 
                 int parentBranch
         );
+        public abstract void collectLeaves(
+                Instance inst, 
+                List<Node> result
+        );
+        public abstract double predict(
+                Instance inst, 
+                HoeffdingAdaptiveTreeRegressor tree
+        );
     }
 
     public abstract class LeafNode extends Node {}
@@ -197,8 +214,51 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
                 HoeffdingAdaptiveTreeRegressor tree, 
                 Node parent, 
                 int parentBranch
-        ){}
+        ){
+                // TODO Auto-generated method stub
+                throw new UnsupportedOperationException("Unimplemented method 'learn'");
+        }
 
+        @Override
+        public void collectLeaves(
+                Instance inst, 
+                List<Node> result
+        ) {
+                // TODO Auto-generated method stub
+                throw new UnsupportedOperationException("Unimplemented method 'collectLeaves'");
+        }
+
+        @Override
+        public double predict(
+                Instance inst, 
+                HoeffdingAdaptiveTreeRegressor tree
+        ) {
+                // TODO Auto-generated method stub
+                throw new UnsupportedOperationException("Unimplemented method 'predict'");
+        }
+
+    }
+
+    public class AdaSplitNode extends SplitNode {
+
+        @Override
+        public void learn(Instance inst, HoeffdingAdaptiveTreeRegressor tree, Node parent, int parentBranch) {
+                // TODO Auto-generated method stub
+                throw new UnsupportedOperationException("Unimplemented method 'learn'");
+        }
+
+        @Override
+        public void collectLeaves(Instance inst, List<Node> result) {
+                // TODO Auto-generated method stub
+                throw new UnsupportedOperationException("Unimplemented method 'collectLeaves'");
+        }
+
+        @Override
+        public double predict(Instance inst, HoeffdingAdaptiveTreeRegressor tree) {
+                // TODO Auto-generated method stub
+                throw new UnsupportedOperationException("Unimplemented method 'predict'");
+        }
+        
     }
 
     //endregion === CLASSES ===
