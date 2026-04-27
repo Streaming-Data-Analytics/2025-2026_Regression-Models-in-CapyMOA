@@ -9,6 +9,7 @@ import com.github.javacliparser.MultiChoiceOption;
 
 import moa.classifiers.AbstractClassifier;
 import moa.classifiers.Regressor;
+import moa.classifiers.core.driftdetection.ADWIN;
 import moa.core.Measurement;
 
 import java.util.ArrayList;
@@ -203,6 +204,15 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         return k - 1;
     }
 
+    private static double normalizeForADWIN(double error, ErrorEstimator stats) {
+        if (stats.getCount() < 2) return 0.0;
+        double mean = stats.getMean();
+        double std  = Math.sqrt(Math.max(0, stats.getVariance()));
+        if (std < 1e-10) return 0.0;
+        double lo = mean - 3.0 * std, hi = mean + 3.0 * std;
+        return Math.min(1.0, Math.max(0.0, (error - lo) / (hi - lo)));
+    }
+    
     //endregion === METHODS ===
 
     //region === CLASSES ===
@@ -224,8 +234,21 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
     }
 
     public abstract class LeafNode extends Node {
+
+        protected double sumY = 0;
+        protected double sumYSq = 0;
+        
+        protected ADWINDetector driftDetector;
+        protected ErrorEstimator errorTracker;
+
         @Override
-        public final void learn(Instance inst, HoeffdingAdaptiveTreeRegressor tree, Node parent, int parentBranch) {
+        public final void learn(
+                Instance inst, 
+                HoeffdingAdaptiveTreeRegressor tree, 
+                Node parent, 
+                int parentBranch
+        ) 
+        {
                 double y = inst.classValue();
                 double y_pred = predict(inst, tree);
                 
@@ -236,6 +259,28 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
                         if (k > 0) w *= k;
                 }
 
+                // Drift detection + error tracking
+                double error   = Math.abs(y - y_pred);
+                double oldMean = errorTracker.getMean();
+                driftDetector.update(normalizeForADWIN(error, errorTracker));
+                errorTracker.update(error);
+                if (driftDetector.detectedChange() && errorTracker.getMean() < oldMean)
+                        errorTracker.reset();
+
+                double preMean = getMean();
+
+                updateStatsBase(inst, w);
+
+                // afterUpdate(inst, w, y, preMean, tree);
+
+                // if (tree.growthAllowed) attemptSplit(tree, parent, parentBranch);
+
+        }
+
+        private void updateStatsBase(Instance inst, double w) {
+            double y = inst.classValue();
+            sumY += w * y;
+            sumYSq += w * y * y;
         }
 
         public double getMean() {
@@ -301,7 +346,13 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
     public class AdaSplitNode extends SplitNode {
 
         @Override
-        public void learn(Instance inst, HoeffdingAdaptiveTreeRegressor tree, Node parent, int parentBranch) {
+        public void learn(
+                Instance inst, 
+                HoeffdingAdaptiveTreeRegressor tree, 
+                Node parent, 
+                int parentBranch
+        ) 
+        {
                 // TODO Auto-generated method stub
                 throw new UnsupportedOperationException("Unimplemented method 'learn'");
         }
@@ -327,6 +378,54 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
                 throw new UnsupportedOperationException("Unimplemented method 'predict'");
         }
         
+    }
+
+    public static class ErrorEstimator {
+        private double mean = 0, M2 = 0;
+        private int n = 0;
+
+        public void update(double v) {
+                n ++;
+                double delta = v - mean;
+                mean += delta / n;
+                M2 += delta * (v - mean);
+        }
+
+        public double getMean() {
+                return mean;
+        }
+
+        public double getVariance() {
+                return n < 2 ? 0: Math.max(0, M2 / (n-1));
+        }
+
+        public int getCount() {
+                return n;
+        }
+
+        public void reset() {
+                mean = 0;
+                M2 = 0;
+                n = 0;
+        }
+    }
+
+    public interface DriftDetector {
+        void update(double value);
+        boolean detectedChange();
+        void reset();
+    }
+
+    public static class ADWINDetector implements DriftDetector {
+        private final double delta;
+        private ADWIN adwin;
+        private boolean changed = false;
+
+        public ADWINDetector(double delta) { this.delta = delta; this.adwin = new ADWIN(delta); }
+
+        @Override public void update(double v){ changed = adwin.setInput(v); }
+        @Override public boolean detectedChange() { return changed; }
+        @Override public void reset() { adwin = new ADWIN(delta); changed = false; }
     }
 
     //endregion === CLASSES ===
