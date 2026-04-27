@@ -10,10 +10,17 @@ import com.github.javacliparser.MultiChoiceOption;
 import moa.classifiers.AbstractClassifier;
 import moa.classifiers.Regressor;
 import moa.classifiers.core.driftdetection.ADWIN;
+import moa.classifiers.trees.HoeffdingAdaptiveTreeRegressor.AdaLeafAdaptive;
+import moa.classifiers.trees.HoeffdingAdaptiveTreeRegressor.AdaLeafMean;
+import moa.classifiers.trees.HoeffdingAdaptiveTreeRegressor.AdaLeafModel;
+import moa.classifiers.trees.HoeffdingAdaptiveTreeRegressor.ErrorEstimator;
 import moa.core.Measurement;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 import org.apache.commons.math3.distribution.NormalDistribution;
 
@@ -237,6 +244,13 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
         protected double sumY = 0;
         protected double sumYSq = 0;
+        protected double weightSeen = 0;
+        protected double weightSeenAtLastSplitEval = 0;
+
+        protected Map<Integer, TEBSTSplitter> splitters = null;
+        protected Map<Integer, NominalSplitter> nominalSplitters = null;
+
+        protected Set<Integer> disabledAttrs = new HashSet<>();
         
         protected ADWINDetector driftDetector;
         protected ErrorEstimator errorTracker;
@@ -273,7 +287,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
                 // afterUpdate(inst, w, y, preMean, tree);
 
-                // if (tree.growthAllowed) attemptSplit(tree, parent, parentBranch);
+                if (tree.growthAllowed) attemptSplit(tree, parent, parentBranch);
 
         }
 
@@ -281,10 +295,35 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
             double y = inst.classValue();
             sumY += w * y;
             sumYSq += w * y * y;
+            weightSeen += w;
+            // update splitters
+            if(isActive()) {
+                int numAttrs = inst.numAttributes() - 1;
+                for (int i = 0; i < numAttrs; i++) {
+                    if (disabledAttrs.contains(i)) continue;
+                    if (inst.attribute(i).isNominal()) {
+                        // nominal splitter
+                    } else {
+                        // tebst splitter
+                    }
+                }
+            }
+
+        }
+
+        public boolean isActive() {
+                return splitters != null;
         }
 
         public double getMean() {
                 return 0.0;
+        }
+
+        protected void attemptSplit(
+                HoeffdingAdaptiveTreeRegressor tree,
+                Node parent, int parentBranch
+        ) {
+                if (!isActive()) return;
         }
 
     }
@@ -427,6 +466,10 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         @Override public boolean detectedChange() { return changed; }
         @Override public void reset() { adwin = new ADWIN(delta); changed = false; }
     }
+
+    public static class TEBSTSplitter {}
+
+    public static class NominalSplitter {}
 
     //endregion === CLASSES ===
     
