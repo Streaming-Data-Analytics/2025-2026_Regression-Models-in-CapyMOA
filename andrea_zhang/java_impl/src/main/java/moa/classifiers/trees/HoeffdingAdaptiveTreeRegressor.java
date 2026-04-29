@@ -10,10 +10,6 @@ import com.github.javacliparser.MultiChoiceOption;
 import moa.classifiers.AbstractClassifier;
 import moa.classifiers.Regressor;
 import moa.classifiers.core.driftdetection.ADWIN;
-import moa.classifiers.trees.HoeffdingAdaptiveTreeRegressor.AdaLeafAdaptive;
-import moa.classifiers.trees.HoeffdingAdaptiveTreeRegressor.AdaLeafMean;
-import moa.classifiers.trees.HoeffdingAdaptiveTreeRegressor.AdaLeafModel;
-import moa.classifiers.trees.HoeffdingAdaptiveTreeRegressor.ErrorEstimator;
 import moa.core.Measurement;
 
 import java.util.ArrayList;
@@ -130,6 +126,11 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
     // seed ??
 
+    public IntOption tebstDigitsOption = new IntOption(
+            "tebstDigits", 'k',
+            "Number of decimal digits for TEBST rounding (River default: 1).",
+            1, 0, 10); 
+
     private static final NormalDistribution NORM = new NormalDistribution();
 
     //endregion === OPTIONS ===
@@ -200,7 +201,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         switch (leafPredictionOption.getChosenIndex()) {
             case 0:  return new AdaLeafMean();
             case 1: return new AdaLeafModel();
-            default:    return new AdaLeafAdaptive();
+            default: return new AdaLeafAdaptive();
         }
     }
 
@@ -303,8 +304,14 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
                     if (disabledAttrs.contains(i)) continue;
                     if (inst.attribute(i).isNominal()) {
                         // nominal splitter
+                        nominalSplitters
+                        .computeIfAbsent(i, k -> new NominalSplitter())
+                        .update((int) inst.value(i), y, w);
                     } else {
                         // tebst splitter
+                        splitters
+                        .computeIfAbsent(i, k -> new TEBSTSplitter(tebstDigitsOption.getValue()))
+                        .update(inst.value(i), y, w);
                     }
                 }
             }
@@ -345,7 +352,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         
     }
 
-    public class AdaLeafModel extends LeafNode {
+    public class AdaLeafModel extends AdaLeafMean {
 
         private LinearModel leafModel;
 
@@ -362,17 +369,11 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         
     }
 
-    public class AdaLeafAdaptive extends LeafNode {
+    public class AdaLeafAdaptive extends AdaLeafModel {
 
         private LinearModel leafModel;
         private double fmseMean  = 0.0;
         private double fmseModel = 0.0;
-
-        @Override
-        public void collectLeaves(Instance inst, List<Node> result) {
-                // TODO Auto-generated method stub
-                throw new UnsupportedOperationException("Unimplemented method 'collectLeaves'");
-        }
 
         @Override
         public double predict(Instance inst, HoeffdingAdaptiveTreeRegressor tree) {
@@ -397,15 +398,15 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         }
 
         @Override
-        public void collectLeaves(Instance inst, List<Node> result) {
-                // TODO Auto-generated method stub
-                throw new UnsupportedOperationException("Unimplemented method 'collectLeaves'");
-        }
-
-        @Override
         public double predict(Instance inst, HoeffdingAdaptiveTreeRegressor tree) {
                 // TODO Auto-generated method stub
                 throw new UnsupportedOperationException("Unimplemented method 'predict'");
+        }
+
+        @Override
+        public void collectLeaves(Instance inst, List<Node> result) {
+                // TODO Auto-generated method stub
+                throw new UnsupportedOperationException("Unimplemented method 'collectLeaves'");
         }
         
     }
@@ -467,9 +468,20 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         @Override public void reset() { adwin = new ADWIN(delta); changed = false; }
     }
 
-    public static class TEBSTSplitter {}
+    public static class TEBSTSplitter {
+        private final double roundFactor;
+        private EBSTNode root = null;
 
-    public static class NominalSplitter {}
+        public TEBSTSplitter(int digits) { this.roundFactor = Math.pow(10, digits); }
+
+        public void update(double attVal, double y, double w) {}
+    }
+
+    public static class EBSTNode {}
+
+    public static class NominalSplitter {
+        public void update(int catIndex, double y, double w) {}
+    }
 
     //endregion === CLASSES ===
     
