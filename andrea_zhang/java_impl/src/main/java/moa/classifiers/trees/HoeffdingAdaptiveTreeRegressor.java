@@ -9,10 +9,12 @@ import com.github.javacliparser.MultiChoiceOption;
 
 import moa.classifiers.AbstractClassifier;
 import moa.classifiers.Regressor;
+import moa.classifiers.core.conditionaltests.InstanceConditionalTest;
 import moa.classifiers.core.driftdetection.ADWIN;
 import moa.core.Measurement;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -225,6 +227,9 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
     //region === CLASSES ===
     public abstract class Node {
+        protected Node parent;
+        protected int depth;
+
         public abstract void learn(
                 Instance inst, 
                 HoeffdingAdaptiveTreeRegressor tree, 
@@ -322,8 +327,29 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
                 return splitters != null;
         }
 
+        public void activate() {
+            if (splitters == null) { 
+                splitters = new HashMap<>(); 
+                nominalSplitters = new HashMap<>();
+            }
+        }
+
+        public void deactivate() { 
+                splitters = null; 
+                nominalSplitters = null; 
+        }
+
         public double getMean() {
                 return 0.0;
+        }
+
+        public double getVariance() {
+            if (weightSeen < 2) return 0;
+            return Math.max(0, (sumYSq - sumY * sumY / weightSeen) / (weightSeen - 1));
+        }
+
+        public void disableAttribute(int attrIdx) {
+                
         }
 
         protected void attemptSplit(
@@ -331,6 +357,136 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
                 Node parent, int parentBranch
         ) {
                 if (!isActive()) return;
+                if (weightSeen - weightSeenAtLastSplitEval < tree.gracePeriodOption.getValue()) return;
+
+                // Depth-based pre-pruning — mirrors River: checked INSIDE the grace-period
+                // block, so deactivation only happens every grace_period instances.
+                if (depth >= tree.maxDepthOption.getValue()) {
+                        deactivate(); tree.nActiveLeaves--; tree.nInactiveLeaves++; return;
+                }
+                weightSeenAtLastSplitEval = weightSeen;
+
+                // da qui in giù vedere HTR
+                double parentVariance = getVariance();
+                if (parentVariance <= 0) return;
+
+                double bestVR        = Double.NEGATIVE_INFINITY;
+                double secondVR      = Double.NEGATIVE_INFINITY;
+                int    bestAttr      = -1;
+                double bestThresh    = 0;
+                int    bestBinaryIdx = -1;
+                boolean bestIsNominal = false;
+                int    nCandidates   = 0;
+                Map<Integer, double[]> perAttrBest = new HashMap<>();
+
+                for (Map.Entry<Integer, TEBSTSplitter> entry : splitters.entrySet()) {
+                        int attrIdx = entry.getKey();
+                        double[] res = entry.getValue().bestSplit(
+                                parentVariance, sumY, sumYSq, weightSeen, tree.minSamplesSplitOption.getValue();
+                        if (res == null) continue;
+                        nCandidates++;
+                        perAttrBest.put(attrIdx, res);
+                        double vr = res[1];
+                        if (vr > bestVR) {
+                                secondVR = bestVR; bestVR = vr;
+                                bestAttr = attrIdx; bestThresh = res[0]; bestIsNominal = false;
+                        } else if (vr > secondVR) { secondVR = vr; }
+                }
+
+                for (Map.Entry<Integer, NominalSplitter> entry : nominalSplitters.entrySet()) {
+                        int attrIdx = entry.getKey();
+                        double[] res = tree.binarySplitOption.isSet()
+                                ? entry.getValue().bestBinarySplit(
+                                        parentVariance, sumY, sumYSq, weightSeen, tree.minSamplesSplitOption.getValue())
+                                : entry.getValue().bestSplit(
+                                        parentVariance, sumY, sumYSq, weightSeen, tree.minSamplesSplitOption.getValue());
+                        if (res == null) continue;
+                        nCandidates++;
+                        double vr = res[1];
+                        if (vr > bestVR) {
+                                secondVR = bestVR; bestVR = vr;
+                                bestAttr = attrIdx; bestIsNominal = true;
+                                bestBinaryIdx = tree.binarySplitOption.isSet() ? (int) res[0] : -1;
+                        } else if (vr > secondVR) { secondVR = vr; }
+                }
+
+                if (nCandidates == 0 || bestVR <= 0) {
+                        if (tree.meritPrepruneOption.isSet()) { 
+                                deactivate(); tree.nActiveLeaves--; 
+                                tree.nInactiveLeaves++; 
+                        }
+                        return;
+                }
+
+                double epsilon = hoeffdingBound(1.0, tree.deltaOption.getValue(), weightSeen);
+                boolean shouldSplit;
+                if (nCandidates == 1) {
+                        shouldSplit = bestVR > 0;
+                } else {
+                        shouldSplit = bestVR > 0 && (
+                                (secondVR / bestVR < 1.0 - epsilon) || (epsilon < tree.tauOption.getValue()));
+                }
+
+                if (shouldSplit) {
+                        InstanceConditionalTest test;
+                        int numBranches;
+                        if (bestIsNominal) {
+                                if (tree.binarySplitOption.isSet()) {
+                                        int[][] parts = nominalSplitters.get(bestAttr).getBinarySplitCategories(bestBinaryIdx);
+                                        Set<Integer> leftSet  = new HashSet<>();
+                                        Set<Integer> rightSet = new HashSet<>();
+                                        for (int c : parts[0]) leftSet.add(c);
+                                        for (int c : parts[1]) rightSet.add(c);
+                                        test = new NominalBinaryTest(bestAttr, leftSet, rightSet);
+                                        numBranches = 2;
+                                } else {
+                                        int[] cats = nominalSplitters.get(bestAttr).getSortedCategories();
+                                        test = new NominalMultiwayTest(bestAttr, cats);
+                                        numBranches = cats.length;
+                                }
+                        } else {
+                                test = new NumericThresholdTest(bestAttr, bestThresh);
+                                numBranches = 2;
+                        }
+                        AdaSplitNode newSplit = (AdaSplitNode) tree.newSplit(parent, test, numBranches, depth);
+                        for (int b = 0; b < numBranches; b++)
+                                //newSplit.children[b] = tree.newLeaf(newSplit, depth + 1);  i figli non dovrebbero partire vuoti
+
+                        if (parent == null) tree.root = newSplit;
+                        else if (parent instanceof AdaSplitNode)
+                                ((AdaSplitNode) parent).children[parentBranch] = newSplit;
+                        newSplit.parent = parent;
+
+                        tree.nActiveLeaves--;
+                        tree.nActiveLeaves += numBranches;
+                        tree.enforceTreeSizeLimit();
+
+                } else if (nCandidates >= 2 && bestVR > 0 && secondVR > 0) {
+                        double secondRatio = secondVR / bestVR;
+                        for (Map.Entry<Integer, double[]> entry : perAttrBest.entrySet()) {
+                                int attrIdx = entry.getKey();
+                                double vr   = entry.getValue()[1];
+                                TEBSTSplitter s = splitters.get(attrIdx);
+                                if (s == null) continue;
+                                s.removeBadSplits(secondRatio, bestVR, epsilon, parentVariance, sumY, sumYSq, weightSeen);
+                                if (tree.removePoorAttrsOption.isSet() && vr / bestVR < secondRatio - 2 * epsilon)
+                                        disableAttribute(attrIdx);
+                        }
+                        if (tree.removePoorAttrsOption.isSet()) {
+                                for (Map.Entry<Integer, NominalSplitter> entry : nominalSplitters.entrySet()) {
+                                        int attrIdx = entry.getKey();
+                                        double[] res = tree.binarySplitOption.isSet()
+                                                ? entry.getValue().bestBinarySplit(
+                                                        parentVariance, sumY, sumYSq, weightSeen, tree.minSamplesSplitOption.getValue())
+                                                : entry.getValue().bestSplit(
+                                                        parentVariance, sumY, sumYSq, weightSeen, tree.minSamplesSplitOption.getValue());
+                                        if (res == null) continue;
+                                        double vr = res[1];
+                                        if (vr / bestVR < secondRatio - 2 * epsilon)
+                                                disableAttribute(attrIdx);
+                                }
+                        }
+                }
         }
 
     }
@@ -474,6 +630,17 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
         public TEBSTSplitter(int digits) { this.roundFactor = Math.pow(10, digits); }
 
+        public double[] bestSplit(double parentVariance, double sumY, double sumYSq, double weightSeen, int value) {
+                // TODO Auto-generated method stub
+                throw new UnsupportedOperationException("Unimplemented method 'bestSplit'");
+        }
+
+        public void removeBadSplits(double secondRatio, double bestVR, double epsilon, double parentVariance,
+                        double sumY, double sumYSq, double weightSeen) {
+                // TODO Auto-generated method stub
+                throw new UnsupportedOperationException("Unimplemented method 'removeBadSplits'");
+        }
+
         public void update(double attVal, double y, double w) {}
     }
 
@@ -481,6 +648,27 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
     public static class NominalSplitter {
         public void update(int catIndex, double y, double w) {}
+
+        public int[][] getBinarySplitCategories(int bestBinaryIdx) {
+                // TODO Auto-generated method stub
+                throw new UnsupportedOperationException("Unimplemented method 'getBinarySplitCategories'");
+        }
+
+        public int[] getSortedCategories() {
+                // TODO Auto-generated method stub
+                throw new UnsupportedOperationException("Unimplemented method 'getSortedCategories'");
+        }
+
+        public double[] bestSplit(double parentVariance, double sumY, double sumYSq, double weightSeen, int value) {
+                // TODO Auto-generated method stub
+                throw new UnsupportedOperationException("Unimplemented method 'bestSplit'");
+        }
+
+        public double[] bestBinarySplit(double parentVariance, double sumY, double sumYSq, double weightSeen,
+                        int value) {
+                // TODO Auto-generated method stub
+                throw new UnsupportedOperationException("Unimplemented method 'bestBinarySplit'");
+        }
     }
 
     //endregion === CLASSES ===
