@@ -1,7 +1,7 @@
 package moa.classifiers.trees;
 
 import com.yahoo.labs.samoa.instances.Instance;
-
+import com.yahoo.labs.samoa.instances.InstancesHeader;
 import com.github.javacliparser.IntOption;
 import com.github.javacliparser.FlagOption;
 import com.github.javacliparser.FloatOption;
@@ -207,6 +207,20 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         }
     }
 
+    protected LeafNode newLeaf(Node parent, int depth, double initSumY, double initSumYSq, double initWeight){
+        LeafNode leaf = newLeaf(parent,depth);
+        leaf.sumY = initSumY;
+        leaf.sumYSq = initSumYSq;
+        leaf.weightSeen = initWeight;
+        leaf.weightSeenAtLastSplitEval = initWeight;
+        return leaf;
+
+    }
+
+    protected SplitNode newSplit(Node parent, InstanceConditionalTest t, int numChildren, int depth) {
+        return new AdaSplitNode(t, numChildren);
+    }
+
     private static int poisson(double rate, java.util.Random rng) {
         double L = Math.exp(-rate);
         int k = 0; double p = 1.0;
@@ -377,12 +391,13 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
                 int    bestBinaryIdx = -1;
                 boolean bestIsNominal = false;
                 int    nCandidates   = 0;
+                double bestLeftSumY = 0, bestLeftSumYSq = 0, bestLeftWeight = 0;
                 Map<Integer, double[]> perAttrBest = new HashMap<>();
 
                 for (Map.Entry<Integer, TEBSTSplitter> entry : splitters.entrySet()) {
                         int attrIdx = entry.getKey();
                         double[] res = entry.getValue().bestSplit(
-                                parentVariance, sumY, sumYSq, weightSeen, tree.minSamplesSplitOption.getValue();
+                                parentVariance, sumY, sumYSq, weightSeen, tree.minSamplesSplitOption.getValue());
                         if (res == null) continue;
                         nCandidates++;
                         perAttrBest.put(attrIdx, res);
@@ -390,6 +405,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
                         if (vr > bestVR) {
                                 secondVR = bestVR; bestVR = vr;
                                 bestAttr = attrIdx; bestThresh = res[0]; bestIsNominal = false;
+                                bestLeftSumY = res[3]; bestLeftSumYSq = res[4]; bestLeftWeight = res[5];
                         } else if (vr > secondVR) { secondVR = vr; }
                 }
 
@@ -407,14 +423,17 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
                                 secondVR = bestVR; bestVR = vr;
                                 bestAttr = attrIdx; bestIsNominal = true;
                                 bestBinaryIdx = tree.binarySplitOption.isSet() ? (int) res[0] : -1;
+                                if( tree.binarySplitOption.isSet()) {
+                                        bestLeftSumY = res[2]; bestLeftSumYSq = res[3]; bestLeftWeight = res[4];
+                                }
                         } else if (vr > secondVR) { secondVR = vr; }
                 }
 
-                if (nCandidates == 0 || bestVR <= 0) {
-                        if (tree.meritPrepruneOption.isSet()) { 
-                                deactivate(); tree.nActiveLeaves--; 
-                                tree.nInactiveLeaves++; 
-                        }
+                if (nCandidates == 0) return;
+                if (bestVR <= 0) {
+                        // null split winds: no attribute improves variance - always deactivate (River)
+                        deactivate(); tree.nActiveLeaves--; tree.nInactiveLeaves++;
+                        tree.enforceTreeSizeLimit();
                         return;
                 }
 
@@ -449,12 +468,45 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
                                 numBranches = 2;
                         }
                         AdaSplitNode newSplit = (AdaSplitNode) tree.newSplit(parent, test, numBranches, depth);
-                        for (int b = 0; b < numBranches; b++)
-                                //newSplit.children[b] = tree.newLeaf(newSplit, depth + 1);  i figli non dovrebbero partire vuoti
+                        if (bestIsNominal && !tree.binarySplitOption.isSet()) {
+                                // multiway: una branch per categoria, stats dirette da catStats
+                                int[] cats = nominalSplitters.get(bestAttr).getSortedCategories();
+                                double[][] catStats = nominalSplitters.get(bestAttr).getChildrenStats(cats);
+
+                                for (int b = 0; b < numBranches; b++) {
+                                        newSplit.children[b] = tree.newLeaf(
+                                        newSplit,
+                                        depth + 1,
+                                        catStats[b][0],
+                                        catStats[b][1],
+                                        catStats[b][2]
+                                        );
+                                }
+                                } else {
+                                // binario (numerico o nominal binary): branch 0 = left, branch 1 = right
+                                double rightSumY   = sumY - bestLeftSumY;
+                                double rightSumYSq = sumYSq - bestLeftSumYSq;
+                                double rightWeight = weightSeen - bestLeftWeight;
+
+                                newSplit.children[0] = tree.newLeaf(
+                                        newSplit,
+                                        depth + 1,
+                                        bestLeftSumY,
+                                        bestLeftSumYSq,
+                                        bestLeftWeight
+                                );
+
+                                newSplit.children[1] = tree.newLeaf(
+                                        newSplit,
+                                        depth + 1,
+                                        rightSumY,
+                                        rightSumYSq,
+                                        rightWeight
+                                );
+                        }
 
                         if (parent == null) tree.root = newSplit;
-                        else if (parent instanceof AdaSplitNode)
-                                ((AdaSplitNode) parent).children[parentBranch] = newSplit;
+                        else ((SplitNode) parent).children[parentBranch] = newSplit;
                         newSplit.parent = parent;
 
                         tree.nActiveLeaves--;
@@ -491,7 +543,16 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
     }
 
-    public abstract class SplitNode extends Node {}
+    public abstract class SplitNode extends Node {
+        protected InstanceConditionalTest splitTest;
+        protected Node[] children;
+
+        public SplitNode(InstanceConditionalTest test, int numBranches) {
+            this.splitTest = test;
+            this.children = new Node[numBranches];
+        }
+
+    }
 
     public class AdaLeafMean extends LeafNode {
 
@@ -540,6 +601,11 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
     }
 
     public class AdaSplitNode extends SplitNode {
+
+        public AdaSplitNode(InstanceConditionalTest test, int numBranches) {
+                super(test, numBranches);
+                //TODO Auto-generated constructor stub
+        }
 
         @Override
         public void learn(
@@ -624,15 +690,128 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         @Override public void reset() { adwin = new ADWIN(delta); changed = false; }
     }
 
+    public static class NumericThresholdTest extends InstanceConditionalTest{
+
+        public NumericThresholdTest(int attrIdx, double threshold) {}
+
+        @Override
+        public void getDescription(StringBuilder sb, int indent) {
+                // TODO Auto-generated method stub
+                throw new UnsupportedOperationException("Unimplemented method 'getDescription'");
+        }
+
+        @Override
+        public int branchForInstance(Instance inst) {
+                // TODO Auto-generated method stub
+                throw new UnsupportedOperationException("Unimplemented method 'branchForInstance'");
+        }
+
+        @Override
+        public int maxBranches() {
+                // TODO Auto-generated method stub
+                throw new UnsupportedOperationException("Unimplemented method 'maxBranches'");
+        }
+
+        @Override
+        public String describeConditionForBranch(int branch, InstancesHeader context) {
+                // TODO Auto-generated method stub
+                throw new UnsupportedOperationException("Unimplemented method 'describeConditionForBranch'");
+        }
+
+        @Override
+        public int[] getAttsTestDependsOn() {
+                // TODO Auto-generated method stub
+                throw new UnsupportedOperationException("Unimplemented method 'getAttsTestDependsOn'");
+        }
+    }
+
+    public static class NominalBinaryTest extends InstanceConditionalTest {
+
+        public NominalBinaryTest(int attrIdx, Set<Integer> leftSet, Set<Integer> rightSet) {}
+
+        @Override
+        public void getDescription(StringBuilder sb, int indent) {
+                // TODO Auto-generated method stub
+                throw new UnsupportedOperationException("Unimplemented method 'getDescription'");
+        }
+
+        @Override
+        public int branchForInstance(Instance inst) {
+                // TODO Auto-generated method stub
+                throw new UnsupportedOperationException("Unimplemented method 'branchForInstance'");
+        }
+
+        @Override
+        public int maxBranches() {
+                // TODO Auto-generated method stub
+                throw new UnsupportedOperationException("Unimplemented method 'maxBranches'");
+        }
+
+        @Override
+        public String describeConditionForBranch(int branch, InstancesHeader context) {
+                // TODO Auto-generated method stub
+                throw new UnsupportedOperationException("Unimplemented method 'describeConditionForBranch'");
+        }
+
+        @Override
+        public int[] getAttsTestDependsOn() {
+                // TODO Auto-generated method stub
+                throw new UnsupportedOperationException("Unimplemented method 'getAttsTestDependsOn'");
+        }}
+
+    public static class NominalMultiwayTest extends InstanceConditionalTest {
+
+        public NominalMultiwayTest(int attrIdx, int[] sortedCategories) {}
+
+        @Override
+        public void getDescription(StringBuilder sb, int indent) {
+                // TODO Auto-generated method stub
+                throw new UnsupportedOperationException("Unimplemented method 'getDescription'");
+        }
+
+        @Override
+        public int branchForInstance(Instance inst) {
+                // TODO Auto-generated method stub
+                throw new UnsupportedOperationException("Unimplemented method 'branchForInstance'");
+        }
+
+        @Override
+        public int maxBranches() {
+                // TODO Auto-generated method stub
+                throw new UnsupportedOperationException("Unimplemented method 'maxBranches'");
+        }
+
+        @Override
+        public String describeConditionForBranch(int branch, InstancesHeader context) {
+                // TODO Auto-generated method stub
+                throw new UnsupportedOperationException("Unimplemented method 'describeConditionForBranch'");
+        }
+
+        @Override
+        public int[] getAttsTestDependsOn() {
+                // TODO Auto-generated method stub
+                throw new UnsupportedOperationException("Unimplemented method 'getAttsTestDependsOn'");
+        }}
+
+
     public static class TEBSTSplitter {
         private final double roundFactor;
         private EBSTNode root = null;
 
         public TEBSTSplitter(int digits) { this.roundFactor = Math.pow(10, digits); }
 
-        public double[] bestSplit(double parentVariance, double sumY, double sumYSq, double weightSeen, int value) {
+        public double[] bestSplit(double parentVariance, double totalSumY, double totalSumYSq, double totalCount, int minSamplesSplit) {
+                if (root == null || totalCount < 2 * minSamplesSplit) return null;
+                double[] result = {Double.NaN, 0.0, 0.0, 0.0, 0.0, 0.0};
+                double[] aux    = {0.0, 0.0, 0.0};
+                findBestSplit(root, result, aux, parentVariance, totalSumY, totalSumYSq, totalCount, minSamplesSplit);
+                return Double.isNaN(result[0]) ? null : result;
+        }
+
+        private void findBestSplit(EBSTNode root2, double[] result, double[] aux, double parentVariance,
+                        double totalSumY, double totalSumYSq, double totalCount, int minSamplesSplit) {
                 // TODO Auto-generated method stub
-                throw new UnsupportedOperationException("Unimplemented method 'bestSplit'");
+                throw new UnsupportedOperationException("Unimplemented method 'findBestSplit'");
         }
 
         public void removeBadSplits(double secondRatio, double bestVR, double epsilon, double parentVariance,
@@ -648,6 +827,11 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
     public static class NominalSplitter {
         public void update(int catIndex, double y, double w) {}
+
+        public double[][] getChildrenStats(int[] cats) {
+                // TODO Auto-generated method stub
+                throw new UnsupportedOperationException("Unimplemented method 'getChildrenStats'");
+        }
 
         public int[][] getBinarySplitCategories(int bestBinaryIdx) {
                 // TODO Auto-generated method stub
@@ -669,6 +853,11 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
                 // TODO Auto-generated method stub
                 throw new UnsupportedOperationException("Unimplemented method 'bestBinarySplit'");
         }
+    }
+
+    public void enforceTreeSizeLimit() {
+        // TODO Auto-generated method stub
+        throw new UnsupportedOperationException("Unimplemented method 'enforceTreeSizeLimit'");
     }
 
     //endregion === CLASSES ===
