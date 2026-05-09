@@ -265,12 +265,15 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
     @Override
     public double[] getVotesForInstance(Instance inst) {
-        if (root == null) return new double[]{0.0};
+        if (root == null) 
+            return new double[]{0.0};
         List<Node> leaves = new ArrayList<>();
         root.collectLeaves(inst, leaves);
-        if (leaves.isEmpty()) return new double[]{0.0};
+        if (leaves.isEmpty()) 
+            return new double[]{0.0};
         double sum = 0;
-        for (Node leaf : leaves) sum += leaf.predict(inst, this);
+        for (Node leaf : leaves) 
+            sum += leaf.predict(inst, this);
         return new double[]{sum / leaves.size()};
     }
 
@@ -299,10 +302,12 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
      * Required because MOA's ADWIN expects bounded input in [0,1].
      */
     private static double normalizeForADWIN(double error, ErrorEstimator stats) {
-        if (stats.getCount() < 2) return 0.0;
+        if (stats.getCount() < 2) 
+            return 0.0;
         double mean = stats.getMean();
         double std  = Math.sqrt(Math.max(0, stats.getVariance()));
-        if (std < 1e-10) return 0.0;
+        if (std < 1e-10) 
+            return 0.0;
         double lo = mean - 3.0 * std, hi = mean + 3.0 * std;
         return Math.min(1.0, Math.max(0.0, (error - lo) / (hi - lo)));
     }
@@ -310,7 +315,9 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
     private static int poisson(double rate, java.util.Random rng) {
         double L = Math.exp(-rate);
         int k = 0; double p = 1.0;
-        do { k++; p *= rng.nextDouble(); } while (p > L);
+        do { 
+            k++; p *= rng.nextDouble(); 
+        } while (p > L);
         return k - 1;
     }
 
@@ -418,26 +425,14 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
         public double getMean() { return weightSeen > 0 ? sumY / weightSeen : 0; }
         public double getVariance() {
-            if (weightSeen < 2) return 0;
+            if (weightSeen < 2) 
+                return 0;
             return Math.max(0, (sumYSq - sumY * sumY / weightSeen) / (weightSeen - 1));
         }
 
         @Override public void collectLeaves(Instance inst, List<Node> result) { result.add(this); }
         @Override public void collectAllActiveLeaves(List<LeafNode> result) { if (isActive()) result.add(this); }
         @Override public void collectAllLeaves(List<LeafNode> result) { result.add(this); }
-
-        // predict() delegates to prediction() so the Node interface is satisfied
-        // with a single override point per subclass.
-        @Override
-        public final double predict(Instance inst, HoeffdingAdaptiveTreeRegressor tree) {
-            return prediction(inst, tree);
-        }
-
-        /**
-         * The prediction each concrete leaf type provides.
-         * Mirrors River's prediction() method overridden by LeafMean / LeafModel / LeafAdaptive.
-         */
-        public abstract double prediction(Instance inst, HoeffdingAdaptiveTreeRegressor tree);
 
         /**
          * Hook called after updateStatsBase() in the shared learn().
@@ -458,7 +453,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         public final void learn(Instance inst, HoeffdingAdaptiveTreeRegressor tree, Node parent, int parentBranch) {
 
             double y = inst.classValue();
-            double y_pred = prediction(inst, tree);   // pre-update prediction
+            double y_pred = predict(inst, tree);   // pre-update prediction
 
             // Bootstrap sampling (River: w *= Poisson(1) if k > 0)
             double w = inst.weight();
@@ -487,20 +482,25 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
             if (tree.growthAllowed) attemptSplit(tree, parent, parentBranch);
         }
 
-        protected void attemptSplit(HoeffdingAdaptiveTreeRegressor tree,
-                                    Node parent, int parentBranch) {
-            if (!isActive()) return;
-            if (weightSeen - weightSeenAtLastSplitEval < tree.gracePeriod) return;
+        protected void attemptSplit(HoeffdingAdaptiveTreeRegressor tree,Node parent, int parentBranch) {
+            if (!isActive()) 
+                return;
+            if (weightSeen - weightSeenAtLastSplitEval < tree.gracePeriod) 
+                return;
 
             // Depth-based pre-pruning — mirrors River: checked INSIDE the grace-period
             // block, so deactivation only happens every grace_period instances.
             if (depth >= tree.maxDepth) {
-                deactivate(); tree.nActiveLeaves--; tree.nInactiveLeaves++; return;
+                deactivate(); 
+                tree.nActiveLeaves--; 
+                tree.nInactiveLeaves++; 
+                return;
             }
             weightSeenAtLastSplitEval = weightSeen;
 
             double parentVariance = getVariance();
-            if (parentVariance <= 0) return;
+            if (parentVariance <= 0) 
+                return;
 
             double bestVR = Double.NEGATIVE_INFINITY;
             double secondVR = Double.NEGATIVE_INFINITY;
@@ -539,7 +539,9 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
                     if( tree.binarySplit) {
                         bestLeftSumY = res[2]; bestLeftSumYSq = res[3]; bestLeftWeight = res[4];
                     }
-                } else if (vr > secondVR) { secondVR = vr; }
+                } else if (vr > secondVR) { 
+                    secondVR = vr; 
+                }
             }
 
             // Mirror River: merit_preprune adds a null split (VR=0) as candidate.
@@ -666,7 +668,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
         /** River: LeafMean.prediction -> stats.mean.get(). */
         @Override
-        public double prediction(Instance inst, HoeffdingAdaptiveTreeRegressor tree) {
+        public double predict(Instance inst, HoeffdingAdaptiveTreeRegressor tree) {
             return getMean();
         }
     }
@@ -691,7 +693,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
         /** River: LeafModel.prediction → leaf_model.predict_one(x). */
         @Override
-        public double prediction(Instance inst, HoeffdingAdaptiveTreeRegressor tree) {
+        public double predict(Instance inst, HoeffdingAdaptiveTreeRegressor tree) {
             return leafModel != null ? leafModel.predict(inst) : getMean();
         }
 
@@ -702,7 +704,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         @Override
         protected void afterUpdate(Instance inst, double w, double y, double preMean, HoeffdingAdaptiveTreeRegressor tree) {
             if (leafModel == null)
-                leafModel = new LinearModel(inst.numAttributes() - 1, tree.learningRate, tree.l2, tree.l1);
+                leafModel = new LinearModel(tree.learningRate, tree.l2, tree.l1);
             leafModel.update(inst, w);
         }
     }
@@ -733,9 +735,9 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
          *   otherwise -> super.prediction() (LeafModel: leafModel or mean)
          */
         @Override
-        public double prediction(Instance inst, HoeffdingAdaptiveTreeRegressor tree) {
+        public double predict(Instance inst, HoeffdingAdaptiveTreeRegressor tree) {
             if (fmseMean < fmseModel) return getMean();
-            return super.prediction(inst, tree);
+            return super.predict(inst, tree);
         }
 
         /**
@@ -746,8 +748,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
          * then update FMSE with pre-update predictions.
          */
         @Override
-        protected void afterUpdate(Instance inst, double w, double y,
-                                   double preMean, HoeffdingAdaptiveTreeRegressor tree) {
+        protected void afterUpdate(Instance inst, double w, double y, double preMean, HoeffdingAdaptiveTreeRegressor tree) {
             double preModel = (leafModel != null) ? leafModel.predict(inst) : preMean;
 
             super.afterUpdate(inst, w, y, preMean, tree);  // initialises + updates leafModel
@@ -778,7 +779,8 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         protected int mostCommonPath() {
             int best = 0;
             for (int i = 1; i < childVisits.length; i++)
-                if (childVisits[i] > childVisits[best]) best = i;
+                if (childVisits[i] > childVisits[best]) 
+                    best = i;
             return best;
         }
 
@@ -790,12 +792,16 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
         @Override
         public void collectAllActiveLeaves(List<LeafNode> result) {
-            for (Node child : children) if (child != null) child.collectAllActiveLeaves(result);
+            for (Node child : children) 
+                if (child != null) 
+                    child.collectAllActiveLeaves(result);
         }
 
         @Override
         public void collectAllLeaves(List<LeafNode> result) {
-            for (Node child : children) if (child != null) child.collectAllLeaves(result);
+            for (Node child : children) 
+                if (child != null) 
+                    child.collectAllLeaves(result);
         }
     }
 
@@ -840,13 +846,15 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         @Override
         public void collectAllActiveLeaves(List<LeafNode> result) {
             super.collectAllActiveLeaves(result);
-            if (alternateTree != null) alternateTree.collectAllActiveLeaves(result);
+            if (alternateTree != null) 
+                alternateTree.collectAllActiveLeaves(result);
         }
 
         @Override
         public void collectAllLeaves(List<LeafNode> result) {
             super.collectAllLeaves(result);
-            if (alternateTree != null) alternateTree.collectAllLeaves(result);
+            if (alternateTree != null) 
+                alternateTree.collectAllLeaves(result);
         }
 
         @Override
@@ -1076,27 +1084,57 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         private static final double CLIP_GRADIENT = 1e12;
         private static final double INTERCEPT_LR  = 0.01;
 
-        private final double[] weights;
+        private final Map<Integer, Double> weights  = new HashMap<>();
+        private final Map<Integer, Double> cumL1map = new HashMap<>();
+        private double maxCumL1 = 0;
         private double bias;
         private final double lr, l2, l1;
 
-        public LinearModel(int n, double lr, double l2, double l1) {
-            this.weights = new double[n]; this.lr = lr; this.l2 = l2; this.l1 = l1;
+        public LinearModel(double lr, double l2, double l1) {
+            this.lr = lr; this.l2 = l2; this.l1 = l1;
         }
 
-        public int getNumWeights() { return weights.length; }
+        public int getNumWeights() { return weights.size(); }
 
         public double predict(Instance inst) {
             double p = bias;
-            for (int i = 0; i < weights.length; i++) {
-                if (inst.attribute(i).isNominal()) continue;
-                p += weights[i] * inst.value(i);
+            for (int j = 0; j < inst.numValues(); j++) {
+                int i = inst.index(j);
+                if (i == inst.classIndex() || inst.attribute(i).isNominal()) 
+                    continue;
+                p += weights.getOrDefault(i, 0.0) * inst.valueSparse(j);
             }
             return p;
         }
 
         public void update(Instance inst, double w) {
-            
+            double rawGradient = (predict(inst) - inst.classValue()) * w;
+            double gradient    = Math.max(-CLIP_GRADIENT, Math.min(CLIP_GRADIENT, rawGradient));
+
+            for (int j = 0; j < inst.numValues(); j++) {
+                int i = inst.index(j);
+                if (i == inst.classIndex() || inst.attribute(i).isNominal()) 
+                    continue;
+                double wi = weights.getOrDefault(i, 0.0);
+                weights.put(i, wi - lr * (gradient * inst.valueSparse(j) + l2 * wi));
+            }
+            bias -= INTERCEPT_LR * gradient;
+
+            if (l1 > 0) {
+                maxCumL1 += l1 * lr;
+                for (int j = 0; j < inst.numValues(); j++) {
+                    int i = inst.index(j);
+                    if (i == inst.classIndex() || inst.attribute(i).isNominal()) continue;
+                    double wOld = weights.getOrDefault(i, 0.0);
+                    double wNew = wOld;
+                    if (wOld > 0) 
+                        wNew = Math.max(0.0, wOld - (maxCumL1 + cumL1map.getOrDefault(i, 0.0)));
+                    else if (wOld < 0) 
+                        wNew = Math.min(0.0, wOld + (maxCumL1 - cumL1map.getOrDefault(i, 0.0)));
+                    weights.put(i, wNew);
+                    cumL1map.merge(i, wNew - wOld, Double::sum);
+                }
+            }
         }
     }
 
