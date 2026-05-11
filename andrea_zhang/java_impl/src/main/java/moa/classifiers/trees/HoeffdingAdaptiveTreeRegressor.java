@@ -1029,10 +1029,18 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
         public void update(double attVal, double y, double w) {
             attVal = round(attVal);
-            if (root == null) 
+            if (root == null)
                 root = new EBSTNode(attVal, y, w);
-            else              
+            else
                 root.insertValue(attVal, y, w);
+        }
+
+        public void update(double attVal, Map<Integer, Double> target, double w) {
+            attVal = round(attVal);
+            if (root == null)
+                root = new EBSTNode(attVal, target, w);
+            else
+                root.insertValue(attVal, target, w);
         }
 
         public double[] bestSplit(double parentVariance, double totalSumY, double totalSumYSq, double totalCount, int minSamplesSplit) {
@@ -1060,19 +1068,105 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
     //endregion === TEBST SPLITTER ===
 
+    //region === VAR (Welford's online weighted variance, mirrors River's stats.Var with ddof=1) ===
+
+    public static class Var {
+        private double mean = 0.0;
+        private double S = 0.0;
+        private double n = 0.0;
+
+        public void update(double x, double w) {
+            n += w;
+            double delta = x - mean;
+            mean += (w / n) * delta;
+            S += w * delta * (x - mean);
+        }
+
+        public double getMean() { return mean; }
+        public double getN() { return n; }
+        public double get() { return n > 1.0 ? S / (n - 1.0) : 0.0; }
+    }
+
+    //endregion === VAR ===
+
     //region === EBST NODE ====
 
     public static class EBSTNode {
-        double   attVal;
-        double   sumY, sumYSq, count;
+        double attVal;
         EBSTNode left, right;
 
+        // univariate: non-null when target is a scalar double
+        Var estimator;
+        // multivariate: non-null when target is Map<Integer, Double>
+        Map<Integer, Var> estimators;
+
         EBSTNode(double attVal, double y, double w) {
-            this.attVal = attVal; this.sumY = w * y; this.sumYSq = w * y * y; this.count = w;
+            this.attVal = attVal;
+            this.estimator = new Var();
+            updateEstimatorUnivariate(y, w);
+        }
+
+        EBSTNode(double attVal, Map<Integer, Double> target, double w) {
+            this.attVal = attVal;
+            this.estimators = new HashMap<>();
+            updateEstimatorMultivariate(target, w);
+        }
+
+        void updateEstimatorUnivariate(double y, double w) {
+            estimator.update(y, w);
+        }
+
+        void updateEstimatorMultivariate(Map<Integer, Double> target, double w) {
+            for (Map.Entry<Integer, Double> e : target.entrySet())
+                estimators.computeIfAbsent(e.getKey(), k -> new Var()).update(e.getValue(), w);
         }
 
         void insertValue(double attVal, double y, double w) {
-            
+            EBSTNode current = this, ante = null;
+            boolean  isRight = false;
+            while (current != null) {
+                ante = current;
+                if (attVal == current.attVal) {
+                    current.updateEstimatorUnivariate(y, w);
+                    return;
+                } else if (attVal < current.attVal) {
+                    current.updateEstimatorUnivariate(y, w);
+                    current = current.left;
+                    isRight = false;
+                } else {
+                    current = current.right;
+                    isRight = true;
+                }
+            }
+            EBSTNode newNode = new EBSTNode(attVal, y, w);
+            if (isRight) 
+                ante.right = newNode;
+            else 
+                ante.left = newNode;
+        }
+
+        void insertValue(double attVal, Map<Integer, Double> target, double w) {
+            EBSTNode current = this, ante = null;
+            boolean isRight = false;
+            while (current != null) {
+                ante = current;
+                if (attVal == current.attVal) {
+                    current.updateEstimatorMultivariate(target, w);
+                    return;
+                } else if (attVal < current.attVal) {
+                    current.updateEstimatorMultivariate(target, w);
+                    current = current.left;
+                    isRight = false;
+                } else {
+                    current = current.right;
+                    isRight = true;
+                }
+            }
+            EBSTNode newNode = new EBSTNode(attVal, target, w);
+            if (isRight) 
+                ante.right = newNode;
+            else         
+                ante.left = newNode;
         }
     }
 
@@ -1091,7 +1185,9 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         private final double lr, l2, l1;
 
         public LinearModel(double lr, double l2, double l1) {
-            this.lr = lr; this.l2 = l2; this.l1 = l1;
+            this.lr = lr; 
+            this.l2 = l2; 
+            this.l1 = l1;
         }
 
         public int getNumWeights() { return weights.size(); }
@@ -1109,7 +1205,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
         public void update(Instance inst, double w) {
             double rawGradient = (predict(inst) - inst.classValue()) * w;
-            double gradient    = Math.max(-CLIP_GRADIENT, Math.min(CLIP_GRADIENT, rawGradient));
+            double gradient = Math.max(-CLIP_GRADIENT, Math.min(CLIP_GRADIENT, rawGradient));
 
             for (int j = 0; j < inst.numValues(); j++) {
                 int i = inst.index(j);
@@ -1170,13 +1266,15 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
         public void update(double v) {
             n++;
-            double delta = v - mean; mean += delta / n; M2 += delta * (v - mean);
+            double delta = v - mean; 
+            mean += delta / n; 
+            M2 += delta * (v - mean);
         }
 
         public double getMean() { return mean; }
         public double getVariance() { return n < 2 ? 0 : Math.max(0, M2 / (n - 1)); }
-        public int    getCount() { return n; }
-        public void   reset() { mean = 0; M2 = 0; n = 0; }
+        public int getCount() { return n; }
+        public void reset() { mean = 0; M2 = 0; n = 0; }
     }
 
     //endregion === ERROR ESTIMATOR  (Welford online mean + variance) ===
