@@ -8,13 +8,13 @@ import com.yahoo.labs.samoa.instances.Instance;
 
 import moa.classifiers.AbstractClassifier;
 import moa.classifiers.Regressor;
-import moa.classifiers.core.driftdetection.ADWIN;
 import moa.core.Measurement;
 import moa.core.SizeOf;
 
 import org.apache.commons.math3.distribution.NormalDistribution;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -141,37 +141,41 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
     //endregion === OPTIONS (MOA CLI / CapyMOA configuration) ===
 
-    protected Node    root;
-    protected double  trainWeightSeen  = 0;
-    protected int     nActiveLeaves    = 0;
-    protected int     nInactiveLeaves  = 0;
-    protected boolean growthAllowed    = true;
-    private   double  sizeEstimateOverhead     = 1.0;
-    private   double  activeLeafSizeEstimate   = 0.0;
-    private   double  inactiveLeafSizeEstimate = 0.0;
+    protected Node root;
+    protected double trainWeightSeen = 0;
+    protected int nActiveLeaves = 0;
+    protected int nInactiveLeaves = 0;
+    protected boolean growthAllowed = true;
+    private double sizeEstimateOverhead = 1.0;
+    private double activeLeafSizeEstimate = 0.0;
+    private double inactiveLeafSizeEstimate = 0.0;
+
+    protected int nAlternateTrees = 0;
+    protected int nSwitchAlternateTrees = 0;
+    protected int nPrunedAlternateTrees = 0;
 
     //region === Convenience fields read from options at reset time ===
-    protected int            gracePeriod;
-    protected double         delta;
-    protected double         tau;
-    protected int            minSamplesSplit;
-    protected int            driftWindowThreshold;
-    protected double         switchSignificance;
+    protected int gracePeriod;
+    protected double delta;
+    protected double tau;
+    protected int minSamplesSplit;
+    protected int driftWindowThreshold;
+    protected double switchSignificance;
     protected LeafPrediction leafPrediction;
-    protected double         learningRate;
-    protected double         l2;
-    protected double         l1;
-    protected double         modelSelectorDecay;
-    protected boolean        binarySplit;
-    protected boolean        bootstrapSampling;
-    protected int            tebstDigits;
-    protected int            maxDepth;
-    protected boolean        removePoorAttrs;
-    protected boolean        stopMemManagement;
-    protected double         maxSizeMiB;
-    protected int            memoryEstimatePeriod;
-    protected double         adwinDelta;
-    protected boolean        meritPreprune;
+    protected double learningRate;
+    protected double l2;
+    protected double l1;
+    protected double modelSelectorDecay;
+    protected boolean binarySplit;
+    protected boolean bootstrapSampling;
+    protected int tebstDigits;
+    protected int maxDepth;
+    protected boolean removePoorAttrs;
+    protected boolean stopMemManagement;
+    protected double maxSizeMiB;
+    protected int memoryEstimatePeriod;
+    protected double adwinDelta;
+    protected boolean meritPreprune;
     //endregion === Convenience fields read from options at reset time ===
 
 
@@ -229,6 +233,9 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         sizeEstimateOverhead = 1.0;
         activeLeafSizeEstimate = 0.0;
         inactiveLeafSizeEstimate = 0.0;
+        nAlternateTrees = 0;
+        nSwitchAlternateTrees = 0;
+        nPrunedAlternateTrees = 0;
     }
 
     @Override
@@ -242,8 +249,11 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
     @Override
     protected Measurement[] getModelMeasurementsImpl() {
         return new Measurement[]{
-            new Measurement("active leaves",   nActiveLeaves),
+            new Measurement("active leaves", nActiveLeaves),
             new Measurement("inactive leaves", nInactiveLeaves),
+            new Measurement("alternate trees", nAlternateTrees),
+            new Measurement("switch alternate trees", nSwitchAlternateTrees),
+            new Measurement("pruned alternate trees", nPrunedAlternateTrees),
         };
     }
 
@@ -258,7 +268,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         }
         root.learn(inst, this, null, -1);
 
-        if ((long) trainWeightSeen % memoryEstimatePeriod == 0) {
+        if (trainWeightSeen % memoryEstimatePeriod == 0) {
             estimateModelSize();
         }
     }
@@ -282,14 +292,155 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
     //region === MEMORY MANAGEMENT ===
 
     private void estimateModelSize() {
-        
+        if (root == null) 
+            return;
+        List<LeafNode> all = new ArrayList<>();
+        root.collectAllLeaves(all);
+        if (all.isEmpty()) 
+            return;
+
+        long activeTotal = 0; 
+        int activeCount = 0;
+        long inactiveTotal = 0; 
+        int inactiveCount = 0;
+        for (LeafNode l : all) {
+            long sz = l.estimateByteSize();
+            if (l.isActive()) { 
+                activeTotal += sz; 
+                activeCount++; 
+            }
+            else { 
+                inactiveTotal += sz; 
+                inactiveCount++; 
+            }
+        }
+        if (activeCount > 0) 
+            activeLeafSizeEstimate = (double) activeTotal / activeCount;
+        if (inactiveCount > 0) 
+            inactiveLeafSizeEstimate = (double) inactiveTotal / inactiveCount;
+
+        double actualBytes = SizeOf.fullSizeOf(this);
+        double estimateBytes = nActiveLeaves * activeLeafSizeEstimate + nInactiveLeaves * inactiveLeafSizeEstimate;
+        if (estimateBytes > 0) 
+            sizeEstimateOverhead = actualBytes / estimateBytes;
+        if (actualBytes > maxSizeMiB * 1024.0 * 1024.0)
+            enforceTreeSizeLimit();
     }
 
     void enforceTreeSizeLimit() {
-        
+        double maxBytes = maxSizeMiB * 1024.0 * 1024.0;
+
+        // Mirrors River: enter only when inactive leaves exist or size is exceeded
+        double treeSize = sizeEstimateOverhead
+            * (nActiveLeaves * activeLeafSizeEstimate + nInactiveLeaves * inactiveLeafSizeEstimate);
+        if (nInactiveLeaves == 0 && treeSize <= maxBytes) 
+            return;
+
+        if (stopMemManagement) {
+            growthAllowed = false;
+            return;
+        }
+
+        List<LeafNode> leaves = new ArrayList<>();
+        if (root != null) root.collectAllLeaves(leaves);
+        if (leaves.isEmpty()) return;
+        leaves.sort(java.util.Comparator.comparingDouble(LeafNode::calculatePromise));
+
+        // Find the maximum number of active leaves that fits in the budget
+        int maxActive = 0;
+        while (maxActive < leaves.size()) {
+            maxActive++;
+            double projected = (maxActive * activeLeafSizeEstimate+ (leaves.size() - maxActive) * inactiveLeafSizeEstimate) * sizeEstimateOverhead;
+            if (projected > maxBytes) {
+                maxActive--;
+                break;
+            }
+        }
+
+        int cutoff = leaves.size() - maxActive;
+
+        // Deactivate worst-promise leaves below the cutoff
+        for (int i = 0; i < cutoff; i++) {
+            LeafNode leaf = leaves.get(i);
+            if (leaf.isActive()) {
+                leaf.deactivate();
+                nInactiveLeaves++;
+                nActiveLeaves--;
+            }
+        }
+
+        // Reactivate best-promise leaves above the cutoff that were previously deactivated
+        for (int i = cutoff; i < leaves.size(); i++) {
+            LeafNode leaf = leaves.get(i);
+            if (!leaf.isActive() && leaf.depth < maxDepth) {
+                leaf.activate();
+                nActiveLeaves++;
+                nInactiveLeaves--;
+            }
+        }
     }
 
     //endregion === MEMORY MANAGEMENT ===
+
+    //region === ATTEMPT TO SPLIT (mirrors River's HoeffdingTreeRegressor._attempt_to_split) ===
+
+    // Called only from LeafNode.learn() after grace period and depth checks.
+    protected void attemptToSplit(LeafNode leaf, Node parent, int parentBranch) {
+        List<SplitSuggestion> bestSplitSuggestions = leaf.bestSplitSuggestions(this);
+        Collections.sort(bestSplitSuggestions);
+        boolean shouldSplit = false;
+        double hb = Double.NaN;
+        if (bestSplitSuggestions.size() < 2) {
+            shouldSplit = !bestSplitSuggestions.isEmpty();
+        } else {
+            hb = hoeffdingBound(1.0, delta, leaf.stats.getN());
+            SplitSuggestion best = bestSplitSuggestions.get(bestSplitSuggestions.size() - 1);
+            SplitSuggestion secondBest = bestSplitSuggestions.get(bestSplitSuggestions.size() - 2);
+            if (best.merit > 0.0 && (
+                    secondBest.merit / best.merit < 1 - hb || hb < tau)) {
+                shouldSplit = true;
+            }
+            if (removePoorAttrs) {
+                double bestRatio = secondBest.merit / best.merit;
+                for (SplitSuggestion suggestion : bestSplitSuggestions) {
+                    if (suggestion.feature != -1
+                            && suggestion.merit / best.merit < bestRatio - 2 * hb) {
+                        leaf.disableAttribute(suggestion.feature);
+                    }
+                }
+            }
+        }
+        if (shouldSplit) {
+            SplitSuggestion splitDecision = bestSplitSuggestions.get(bestSplitSuggestions.size() - 1);
+            if (splitDecision.feature == -1) {
+                leaf.deactivate();
+                nInactiveLeaves++;
+                nActiveLeaves--;
+            } else {
+                AdaSplitNode newSplit = splitDecision.assemble(leaf.depth, adwinDelta);
+                for (int b = 0; b < splitDecision.childrenStats.length; b++) {
+                    newSplit.children[b] = newLeaf(leaf.depth + 1, splitDecision.childrenStats[b], leaf);
+                }
+                nActiveLeaves--;
+                nActiveLeaves += splitDecision.childrenStats.length;
+                if (parent == null)
+                    root = newSplit;
+                else
+                    ((SplitNode) parent).children[parentBranch] = newSplit;
+            }
+            enforceTreeSizeLimit();
+        } else if (
+                bestSplitSuggestions.size() >= 2
+                && bestSplitSuggestions.get(bestSplitSuggestions.size() - 1).merit > 0
+                && bestSplitSuggestions.get(bestSplitSuggestions.size() - 2).merit > 0) {
+            double lastCheckRatio = bestSplitSuggestions.get(bestSplitSuggestions.size() - 2).merit
+                / bestSplitSuggestions.get(bestSplitSuggestions.size() - 1).merit;
+            double lastCheckVR = bestSplitSuggestions.get(bestSplitSuggestions.size() - 1).merit;
+            leaf.manageMemory(lastCheckRatio, lastCheckVR, hb, minSamplesSplit);
+        }
+    }
+
+    //endregion === ATTEMPT TO SPLIT ===
 
     //region === STATIC HELPERS ===
 
@@ -297,26 +448,13 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         return Math.sqrt((range * range * Math.log(1.0 / confidence)) / (2.0 * n));
     }
 
-    /**
-     * Normalizes an absolute prediction error to [0,1] using the 3σ empirical rule.
-     * Required because MOA's ADWIN expects bounded input in [0,1].
-     */
-    private static double normalizeForADWIN(double error, ErrorEstimator stats) {
-        if (stats.getCount() < 2) 
-            return 0.0;
-        double mean = stats.getMean();
-        double std  = Math.sqrt(Math.max(0, stats.getVariance()));
-        if (std < 1e-10) 
-            return 0.0;
-        double lo = mean - 3.0 * std, hi = mean + 3.0 * std;
-        return Math.min(1.0, Math.max(0.0, (error - lo) / (hi - lo)));
-    }
-
     private static int poisson(double rate, java.util.Random rng) {
         double L = Math.exp(-rate);
-        int k = 0; double p = 1.0;
+        int k = 0; 
+        double p = 1.0;
         do { 
-            k++; p *= rng.nextDouble(); 
+            k++; 
+            p *= rng.nextDouble(); 
         } while (p > L);
         return k - 1;
     }
@@ -330,13 +468,16 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
         public Node(int depth) { this.depth = depth; }
 
-        public abstract void learn(Instance inst, HoeffdingAdaptiveTreeRegressor tree,
-                                     Node parent, int parentBranch);
+        public abstract void learn(Instance inst, HoeffdingAdaptiveTreeRegressor tree, Node parent, int parentBranch);
         public abstract double predict(Instance inst, HoeffdingAdaptiveTreeRegressor tree);
-        public ErrorEstimator getErrorTracker() { return null; }
+        public Var getErrorTracker() { return null; }
         public abstract void collectLeaves(Instance inst, List<Node> result);
         public abstract void collectAllActiveLeaves(List<LeafNode> result);
         public abstract void collectAllLeaves(List<LeafNode> result);
+        // Mirrors River's total_weight and n_leaves properties.
+        public abstract double totalWeight();
+        public abstract int nLeaves();
+        public void killTreeChildren(HoeffdingAdaptiveTreeRegressor tree) {}
     }
 
     //endregion === NODE BASE ===
@@ -359,95 +500,84 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
     public abstract static class LeafNode extends Node {
 
-        protected double sumY = 0;
-        protected double sumYSq = 0;
-        protected double weightSeen = 0;
+        protected Var stats = new Var();
         protected double weightSeenAtLastSplitEval = 0;
 
         // ADWIN + error tracker live here because learn() uses them
         protected ADWINDetector driftDetector;
-        protected ErrorEstimator errorTracker;
+        protected Var errorTracker;
 
-        /** Per-attribute TEBST splitters; null → leaf is inactive. */
-        protected Map<Integer, TEBSTSplitter> splitters = null;
-        protected Map<Integer, NominalSplitter> nominalSplitters = null;
+        /** Per-attribute splitters (numeric: TEBSTSplitter, nominal: NominalSplitter); null → inactive. */
+        protected Map<Integer, Splitter> splitters = null;
         protected Set<Integer> disabledAttrs = new HashSet<>();
 
         // Stored locally so updateStatsBase can use it without an outer-class reference.
         private int tebstDigits;
 
+        // Mirrors River's AdaLeafRegressor.rng: reference to the shared tree RNG.
+        protected java.util.Random rng;
+
         public LeafNode(int depth, double adwinDelta, int tebstDigits) {
             super(depth);
             this.tebstDigits = tebstDigits;
             this.driftDetector = new ADWINDetector(adwinDelta);
-            this.errorTracker = new ErrorEstimator();
+            this.errorTracker = new Var();
             this.splitters = new HashMap<>();
-            this.nominalSplitters = new HashMap<>();
         }
 
-        @Override public ErrorEstimator getErrorTracker() { return errorTracker; }
+        @Override public Var getErrorTracker() { return errorTracker; }
 
         public boolean isActive() { return splitters != null; }
         public void activate() {
-            if (splitters == null) { splitters = new HashMap<>(); nominalSplitters = new HashMap<>(); }
+            if (splitters == null) splitters = new HashMap<>();
         }
-        public void deactivate() { splitters = null; nominalSplitters = null; }
+        public void deactivate() { splitters = null; }
 
         public double calculatePromise() { return -depth; }
 
         public long estimateByteSize() { return SizeOf.fullSizeOf(this); }
 
         public void disableAttribute(int attrIdx) {
-            if (splitters != null) splitters.remove(attrIdx);
-            if (nominalSplitters != null) nominalSplitters.remove(attrIdx);
-            disabledAttrs.add(attrIdx);
+            if (splitters != null && splitters.remove(attrIdx) != null)
+                disabledAttrs.add(attrIdx);
         }
 
-        // Updates target statistics and splitters only — no leafModel.
-        // Mirrors River's LeafMean.learn_one (the deepest super() in the MRO chain).
+        // Mirrors River's HTLeaf.learn_one: update_stats then update_splitters.
         private void updateStatsBase(Instance inst, double w) {
             double y = inst.classValue();
-            sumY += w * y;
-            sumYSq += w * y * y;
-            weightSeen += w;
+            stats.update(y, w);
             if (isActive()) {
                 int numAttrs = inst.numAttributes() - 1;
                 for (int i = 0; i < numAttrs; i++) {
-                    if (disabledAttrs.contains(i)) continue;
-                    if (inst.attribute(i).isNominal()) {
-                        nominalSplitters.computeIfAbsent(i, k -> new NominalSplitter()).update((int) inst.value(i), y, w);
-                    } else {
-                        splitters.computeIfAbsent(i, k -> new TEBSTSplitter(tebstDigits)).update(inst.value(i), y, w);
-                    }
+                    if (disabledAttrs.contains(i) || inst.isMissing(i))
+                        continue;
+                    boolean isNom = inst.attribute(i).isNominal();
+                    splitters.computeIfAbsent(i, k -> isNom ? new NominalSplitter() : new TEBSTSplitter(tebstDigits)).update(inst.value(i), y, w);
                 }
             }
         }
 
-        public double getMean() { return weightSeen > 0 ? sumY / weightSeen : 0; }
-        public double getVariance() {
-            if (weightSeen < 2) 
-                return 0;
-            return Math.max(0, (sumYSq - sumY * sumY / weightSeen) / (weightSeen - 1));
-        }
+        public double getMean() { return stats.getMean(); }
+        public double getVariance() { return stats.get(); }
+
+        @Override public double totalWeight() { return stats.getN(); }
+        @Override public int nLeaves() { return 1; }
 
         @Override public void collectLeaves(Instance inst, List<Node> result) { result.add(this); }
         @Override public void collectAllActiveLeaves(List<LeafNode> result) { if (isActive()) result.add(this); }
         @Override public void collectAllLeaves(List<LeafNode> result) { result.add(this); }
 
-        /**
-         * Hook called after updateStatsBase() in the shared learn().
-         * Subclasses override to update the leaf model and/or FMSE trackers.
-         * Default is a no-op (AdaLeafMean needs nothing extra).
-         *
-         * @param preMean  target mean captured BEFORE updateStatsBase() ran
-         */
+        // Hook: called BEFORE updateStatsBase() — mirrors River's LeafAdaptive.learn_one (FMSE update).
+        protected void beforeUpdate(Instance inst, double w, double y, double preMean, HoeffdingAdaptiveTreeRegressor tree) {}
+
+        // Hook: called AFTER updateStatsBase() — mirrors River's LeafModel.learn_one (model update).
         protected void afterUpdate(Instance inst, double w, double y, double preMean, HoeffdingAdaptiveTreeRegressor tree) {}
 
         /**
          * Single shared learn() — mirrors River's AdaLeafRegressor.learn_one.
          *
          * All leaf types inherit this unchanged; they only differ in prediction()
-         * and afterUpdate().
+         * and beforeUpdate() / afterUpdate().
          */
         @Override
         public final void learn(Instance inst, HoeffdingAdaptiveTreeRegressor tree, Node parent, int parentBranch) {
@@ -458,195 +588,65 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
             // Bootstrap sampling (River: w *= Poisson(1) if k > 0)
             double w = inst.weight();
             if (tree.bootstrapSampling) {
-                int k = poisson(1.0, tree.classifierRandom);
-                if (k > 0) w *= k;
+                int k = poisson(1.0, rng);
+                if (k > 0)
+                    w *= k;
             }
 
             // Drift detection + error tracking
             double error = Math.abs(y - y_pred);
             double oldMean = errorTracker.getMean();
-            driftDetector.update(normalizeForADWIN(error, errorTracker));
-            errorTracker.update(error);
+            driftDetector.update(error);
+            errorTracker.update(error, 1.0);
             if (driftDetector.detectedChange() && errorTracker.getMean() < oldMean)
-                errorTracker.reset();
+                errorTracker = new Var();
 
-            // Capture pre-update mean BEFORE stats change (needed by AdaLeafAdaptive)
             double preMean = getMean();
 
-            // Stats + splitters update (River: LeafMean.learn_one via super chain)
+            // River: LeafAdaptive.learn_one — FMSE update with pre-update predictions
+            beforeUpdate(inst, w, y, preMean, tree);
+
+            // River: HTLeaf.learn_one — stats + splitters update
             updateStatsBase(inst, w);
 
-            // Subclass hook: model update, FMSE, etc.
+            // River: LeafModel.learn_one — model update
             afterUpdate(inst, w, y, preMean, tree);
 
-            if (tree.growthAllowed) attemptSplit(tree, parent, parentBranch);
+            // Mirrors River AdaLeafRegressor.learn_one: grace period + depth check here,
+            // not inside attemptToSplit.
+            double weightSeen = stats.getN();
+            if (weightSeen - weightSeenAtLastSplitEval >= tree.gracePeriod) {
+                if (depth >= tree.maxDepth) {
+                    deactivate();
+                    tree.nActiveLeaves--;
+                    tree.nInactiveLeaves++;
+                } else if (isActive()) {
+                    tree.attemptToSplit(this, parent, parentBranch);
+                    weightSeenAtLastSplitEval = weightSeen;
+                }
+            }
         }
 
-        protected void attemptSplit(HoeffdingAdaptiveTreeRegressor tree,Node parent, int parentBranch) {
-            if (!isActive()) 
-                return;
-            if (weightSeen - weightSeenAtLastSplitEval < tree.gracePeriod) 
-                return;
+        // Mirrors River's HTLeaf.best_split_suggestions(split_criterion, tree).
+        List<SplitSuggestion> bestSplitSuggestions(HoeffdingAdaptiveTreeRegressor tree) {
+            List<SplitSuggestion> suggestions = new ArrayList<>();
+            if (tree.meritPreprune)
+                suggestions.add(SplitSuggestion.NULL);
 
-            // Depth-based pre-pruning — mirrors River: checked INSIDE the grace-period
-            // block, so deactivation only happens every grace_period instances.
-            if (depth >= tree.maxDepth) {
-                deactivate(); 
-                tree.nActiveLeaves--; 
-                tree.nInactiveLeaves++; 
-                return;
-            }
-            weightSeenAtLastSplitEval = weightSeen;
-
-            double parentVariance = getVariance();
-            if (parentVariance <= 0) 
-                return;
-
-            double bestVR = Double.NEGATIVE_INFINITY;
-            double secondVR = Double.NEGATIVE_INFINITY;
-            int    bestAttr = -1;
-            double bestThresh = 0;
-            int    bestBinaryIdx = -1;
-            boolean bestIsNominal = false;
-            int    nCandidates = 0;
-            double bestLeftSumY = 0, bestLeftSumYSq = 0, bestLeftWeight = 0;
-            Map<Integer, double[]> perAttrBest = new HashMap<>();
-
-            for (Map.Entry<Integer, TEBSTSplitter> entry : splitters.entrySet()) {
-                int attrIdx = entry.getKey();
-                double[] res = entry.getValue().bestSplit(parentVariance, sumY, sumYSq, weightSeen, tree.minSamplesSplit);
-                if (res == null) continue;
-                nCandidates++;
-                perAttrBest.put(attrIdx, res);
-                double vr = res[1];
-                if (vr > bestVR) {
-                    secondVR = bestVR; bestVR = vr;
-                    bestAttr = attrIdx; bestThresh = res[0]; bestIsNominal = false;
-                    bestLeftSumY = res[3]; bestLeftSumYSq = res[4]; bestLeftWeight = res[5];
-                } else if (vr > secondVR) { secondVR = vr; }
+            for (Map.Entry<Integer, Splitter> entry : splitters.entrySet()) {
+                SplitSuggestion s = entry.getValue().bestEvaluatedSplitSuggestion(
+                    stats, entry.getKey(), tree.binarySplit, tree.minSamplesSplit);
+                if (s != null)
+                    suggestions.add(s);
             }
 
-            for (Map.Entry<Integer, NominalSplitter> entry : nominalSplitters.entrySet()) {
-                int attrIdx = entry.getKey();
-                double[] res = tree.binarySplit ? entry.getValue().bestBinarySplit(parentVariance, sumY, sumYSq, weightSeen, tree.minSamplesSplit) : entry.getValue().bestSplit(parentVariance, sumY, sumYSq, weightSeen, tree.minSamplesSplit);
-                if (res == null) continue;
-                nCandidates++;
-                double vr = res[1];
-                if (vr > bestVR) {
-                    secondVR = bestVR; bestVR = vr;
-                    bestAttr = attrIdx; bestIsNominal = true;
-                    bestBinaryIdx = tree.binarySplit ? (int) res[0] : -1;
-                    if( tree.binarySplit) {
-                        bestLeftSumY = res[2]; bestLeftSumYSq = res[3]; bestLeftWeight = res[4];
-                    }
-                } else if (vr > secondVR) { 
-                    secondVR = vr; 
-                }
-            }
+            return suggestions;
+        }
 
-            // Mirror River: merit_preprune adds a null split (VR=0) as candidate.
-            // If no real candidate improves variance, the null split wins → deactivate.
-            // With merit_preprune=False no null split is added, so this path never fires.
-            if (nCandidates == 0 || bestVR <= 0) {
-                if (tree.meritPreprune) {
-                    deactivate(); tree.nActiveLeaves--; tree.nInactiveLeaves++;
-                    tree.enforceTreeSizeLimit();
-                }
-                return;
-            }
-
-            double epsilon = hoeffdingBound(1.0, tree.delta, weightSeen);
-            boolean shouldSplit;
-            if (nCandidates == 1) {
-                shouldSplit = bestVR > 0;
-            } else {
-                shouldSplit = bestVR > 0 && (
-                        (secondVR / bestVR < 1.0 - epsilon) || (epsilon < tree.tau));
-            }
-
-            if (shouldSplit) {
-                AdaSplitNode newSplit;
-                int numBranches;
-                if (bestIsNominal) {
-                    if (tree.binarySplit) {
-                        int[][] parts = nominalSplitters.get(bestAttr).getBinarySplitCategories(bestBinaryIdx);
-                        Set<Integer> leftSet  = new HashSet<>();
-                        Set<Integer> rightSet = new HashSet<>();
-                        for (int c : parts[0]) leftSet.add(c);
-                        for (int c : parts[1]) rightSet.add(c);
-                        newSplit = new AdaNomBinarySplitNode(depth, bestAttr, leftSet, rightSet, tree.adwinDelta);
-                        numBranches = 2;
-                    } else {
-                        int[] cats = nominalSplitters.get(bestAttr).getSortedCategories();
-                        newSplit = new AdaNomMultiwaySplitNode(depth, bestAttr, cats, tree.adwinDelta);
-                        numBranches = cats.length;
-                    }
-                } else {
-                    newSplit = new AdaNumBinarySplitNode(depth, bestAttr, bestThresh, tree.adwinDelta);
-                    numBranches = 2;
-                }
-                if (bestIsNominal && !tree.binarySplit) {
-                    // multiway: una branch per categoria, stats dirette da catStats
-                    int[] cats = nominalSplitters.get(bestAttr).getSortedCategories();
-                    double[][] catStats = nominalSplitters.get(bestAttr).getChildrenStats(cats);
-
-                    for (int b = 0; b < numBranches; b++) {
-                        newSplit.children[b] = tree.newLeaf(
-                            depth + 1,
-                            catStats[b][0],
-                            catStats[b][1],
-                            catStats[b][2]
-                        );
-                    }
-                } else {
-                    // binario (numerico o nominal binary): branch 0 = left, branch 1 = right
-                    double rightSumY = sumY - bestLeftSumY;
-                    double rightSumYSq = sumYSq - bestLeftSumYSq;
-                    double rightWeight = weightSeen - bestLeftWeight;
-
-                    newSplit.children[0] = tree.newLeaf(
-                        depth + 1,
-                        bestLeftSumY,
-                        bestLeftSumYSq,
-                        bestLeftWeight
-                    );
-
-                    newSplit.children[1] = tree.newLeaf(
-                        depth + 1,
-                        rightSumY,
-                        rightSumYSq,
-                        rightWeight
-                    );
-                }
-
-                if (parent == null) tree.root = newSplit;
-                else ((SplitNode) parent).children[parentBranch] = newSplit;
-
-                tree.nActiveLeaves--;
-                tree.nActiveLeaves += numBranches;
-                tree.enforceTreeSizeLimit();
-
-            } else if (nCandidates >= 2 && bestVR > 0 && secondVR > 0) {
-                double secondRatio = secondVR / bestVR;
-                for (Map.Entry<Integer, double[]> entry : perAttrBest.entrySet()) {
-                    int attrIdx = entry.getKey();
-                    double vr   = entry.getValue()[1];
-                    TEBSTSplitter s = splitters.get(attrIdx);
-                    if (s == null) continue;
-                    s.removeBadSplits(secondRatio, bestVR, epsilon, parentVariance, sumY, sumYSq, weightSeen);
-                    if (tree.removePoorAttrs && vr / bestVR < secondRatio - 2 * epsilon)
-                        disableAttribute(attrIdx);
-                }
-                if (tree.removePoorAttrs) {
-                    for (Map.Entry<Integer, NominalSplitter> entry : nominalSplitters.entrySet()) {
-                        int attrIdx = entry.getKey();
-                        double[] res = tree.binarySplit ? entry.getValue().bestBinarySplit(parentVariance, sumY, sumYSq, weightSeen, tree.minSamplesSplit) : entry.getValue().bestSplit(parentVariance, sumY, sumYSq, weightSeen, tree.minSamplesSplit);
-                        if (res == null) continue;
-                        double vr = res[1];
-                        if (vr / bestVR < secondRatio - 2 * epsilon)
-                            disableAttribute(attrIdx);
-                    }
-                }
+        // Mirrors River's LeafMean.manage_memory.
+        void manageMemory(double lastCheckRatio, double lastCheckVR, double lastCheckE, int minSamplesSplit) {
+            for (Splitter s : splitters.values()) {
+                s.removeBadSplits(lastCheckRatio, lastCheckVR, lastCheckE, minSamplesSplit, stats);
             }
         }
     }
@@ -687,24 +687,20 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
         protected LinearModel leafModel;
 
-        public AdaLeafModel(int depth, double adwinDelta, int tebstDigits) {
+        public AdaLeafModel(int depth, double adwinDelta, int tebstDigits, double learningRate, double l2, double l1) {
             super(depth, adwinDelta, tebstDigits);
+            this.leafModel = new LinearModel(learningRate, l2, l1);
         }
 
-        /** River: LeafModel.prediction → leaf_model.predict_one(x). */
+        // River: LeafModel.prediction → leaf_model.predict_one(x).
         @Override
         public double predict(Instance inst, HoeffdingAdaptiveTreeRegressor tree) {
-            return leafModel != null ? leafModel.predict(inst) : getMean();
+            return leafModel.predict(inst);
         }
 
-        /**
-         * River: LeafModel.learn_one → leaf_model.learn_one(x, y, w).
-         * Stats are already updated by the time this hook runs.
-         */
+        // River: LeafModel.learn_one → leaf_model.learn_one(x, y, w).
         @Override
         protected void afterUpdate(Instance inst, double w, double y, double preMean, HoeffdingAdaptiveTreeRegressor tree) {
-            if (leafModel == null)
-                leafModel = new LinearModel(tree.learningRate, tree.l2, tree.l1);
             leafModel.update(inst, w);
         }
     }
@@ -717,45 +713,40 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
     //
     // Extends AdaLeafModel (mirrors River: LeafAdaptive extends LeafModel).
     // Inherits learn() from LeafNode and leafModel field from AdaLeafModel.
-    // afterUpdate() captures preModel BEFORE calling super.afterUpdate() (which
-    // updates leafModel), then computes FMSE — matching River's LeafAdaptive.learn_one order.
+    // beforeUpdate() mirrors River's LeafAdaptive.learn_one: captures pre-update predictions
+    // and updates FMSE BEFORE stats/model are updated.
+    // afterUpdate() delegates to super (LeafModel model update).
 
     public static class AdaLeafAdaptive extends AdaLeafModel {
 
         private double fmseMean  = 0.0;
         private double fmseModel = 0.0;
 
-        public AdaLeafAdaptive(int depth, double adwinDelta, int tebstDigits) {
-            super(depth, adwinDelta, tebstDigits);
+        public AdaLeafAdaptive(int depth, double adwinDelta, int tebstDigits, double learningRate, double l2, double l1) {
+            super(depth, adwinDelta, tebstDigits, learningRate, l2, l1);
         }
 
-        /**
-         * River: LeafAdaptive.prediction.
-         *   fmse_mean < fmse_model -> mean wins  (regression tree mode)
-         *   otherwise -> super.prediction() (LeafModel: leafModel or mean)
-         */
+        // River: LeafAdaptive.prediction
         @Override
         public double predict(Instance inst, HoeffdingAdaptiveTreeRegressor tree) {
-            if (fmseMean < fmseModel) return getMean();
+            if (fmseMean < fmseModel)
+                return getMean();
             return super.predict(inst, tree);
         }
 
-        /**
-         * River: LeafAdaptive.learn_one captures pre-update predictions, then
-         * calls super().learn_one() which updates leafModel (LeafModel.learn_one).
-         *
-         * Here: capture preModel BEFORE super.afterUpdate() updates leafModel,
-         * then update FMSE with pre-update predictions.
-         */
+        // River: LeafAdaptive.learn_one — FMSE update with pre-update predictions (before stats/model).
         @Override
-        protected void afterUpdate(Instance inst, double w, double y, double preMean, HoeffdingAdaptiveTreeRegressor tree) {
-            double preModel = (leafModel != null) ? leafModel.predict(inst) : preMean;
-
-            super.afterUpdate(inst, w, y, preMean, tree);  // initialises + updates leafModel
-
+        protected void beforeUpdate(Instance inst, double w, double y, double preMean, HoeffdingAdaptiveTreeRegressor tree) {
+            double preModel = leafModel.predict(inst);
             double d = tree.modelSelectorDecay;
             fmseMean  = d * fmseMean  + (y - preMean)  * (y - preMean);
             fmseModel = d * fmseModel + (y - preModel) * (y - preModel);
+        }
+
+        // River: LeafModel.learn_one — model update (delegated to super).
+        @Override
+        protected void afterUpdate(Instance inst, double w, double y, double preMean, HoeffdingAdaptiveTreeRegressor tree) {
+            super.afterUpdate(inst, w, y, preMean, tree);
         }
     }
     //endregion === ADA LEAF ADAPTIVE ===
@@ -765,42 +756,65 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
     public abstract static class SplitNode extends Node {
 
-        protected Node[]   children;
-        protected double[] childVisits;
+        protected Node[] children;
 
         public SplitNode(int numChildren, int depth) {
             super(depth);
-            this.children    = new Node[numChildren];
-            this.childVisits = new double[numChildren];
+            this.children = new Node[numChildren];
         }
 
         public abstract int getBranchIndex(Instance inst);
 
+        // Mirrors River's most_common_path (defined per-subclass in branch.py): finds child with highest total_weight.
         protected int mostCommonPath() {
             int best = 0;
-            for (int i = 1; i < childVisits.length; i++)
-                if (childVisits[i] > childVisits[best]) 
-                    best = i;
+            double bestW = children[0] != null ? children[0].totalWeight() : -1;
+            for (int i = 1; i < children.length; i++) {
+                double w = children[i] != null ? children[i].totalWeight() : -1;
+                if (w > bestW) { 
+                    bestW = w; 
+                    best = i; 
+                }
+            }
             return best;
         }
 
         public Node routeChild(Instance inst) {
             int branch = getBranchIndex(inst);
-            if (branch < 0 || branch >= children.length) branch = mostCommonPath();
+            if (branch < 0 || branch >= children.length) 
+                branch = mostCommonPath();
             return children[branch];
+        }
+
+        // Mirrors River's DTBranch.total_weight: recursive sum over children.
+        @Override
+        public double totalWeight() {
+            double sum = 0;
+            for (Node child : children)
+                if (child != null) sum += child.totalWeight();
+            return sum;
+        }
+
+        // Mirrors River's DTBranch.n_leaves: recursive count of all leaves.
+        @Override
+        public int nLeaves() {
+            int sum = 0;
+            for (Node child : children)
+                if (child != null) sum += child.nLeaves();
+            return sum;
         }
 
         @Override
         public void collectAllActiveLeaves(List<LeafNode> result) {
-            for (Node child : children) 
-                if (child != null) 
+            for (Node child : children)
+                if (child != null)
                     child.collectAllActiveLeaves(result);
         }
 
         @Override
         public void collectAllLeaves(List<LeafNode> result) {
-            for (Node child : children) 
-                if (child != null) 
+            for (Node child : children)
+                if (child != null)
                     child.collectAllLeaves(result);
         }
     }
@@ -812,18 +826,18 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
     public abstract static class AdaSplitNode extends SplitNode {
 
         protected ADWINDetector  driftDetector;
-        protected ErrorEstimator errorTracker;
-        protected Node           alternateTree;
+        protected Var  errorTracker;
+        protected Node alternateTree;
 
-        protected double branchSumY = 0, branchSumYSq = 0, branchWeight = 0;
+        protected Var branchStats = new Var();
 
         public AdaSplitNode(int numChildren, int depth, double adwinDelta) {
             super(numChildren, depth);
             this.driftDetector = new ADWINDetector(adwinDelta);
-            this.errorTracker  = new ErrorEstimator();
+            this.errorTracker = new Var();
         }
 
-        @Override public ErrorEstimator getErrorTracker() { return errorTracker; }
+        @Override public Var getErrorTracker() { return errorTracker; }
 
         public void collectAllBranchNodes(List<AdaSplitNode> result) {
             result.add(this);
@@ -834,13 +848,15 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
                 ((AdaSplitNode) alternateTree).collectAllBranchNodes(result);
         }
 
-        public double getBranchMean() { return branchWeight > 0 ? branchSumY / branchWeight : 0; }
+        public double getBranchMean() { return branchStats.getMean(); }
 
         @Override
         public void collectLeaves(Instance inst, List<Node> result) {
-            if (alternateTree != null) alternateTree.collectLeaves(inst, result);
+            if (alternateTree != null) 
+                alternateTree.collectLeaves(inst, result);
             Node child = routeChild(inst);
-            if (child != null) child.collectLeaves(inst, result);
+            if (child != null) 
+                child.collectLeaves(inst, result);
         }
 
         @Override
@@ -859,8 +875,83 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
         @Override
         public void learn(Instance inst, HoeffdingAdaptiveTreeRegressor tree, Node parent, int parentBranch) {
+            double y = inst.classValue();
+            double w = inst.weight();
 
-            
+            // Get prediction from the leaf this instance would reach (not alternate subtrees)
+            Node curr = routeChild(inst);
+            while (curr instanceof SplitNode) curr = ((SplitNode) curr).routeChild(inst);
+            double yPred = (curr != null) ? curr.predict(inst, tree) : getBranchMean();
+
+            // Update branch stats with original (un-sampled) weight, mirrors River's self.stats.update(y, w)
+            branchStats.update(y, w);
+
+            double driftInput = Math.abs(y - yPred);
+            double oldMean = errorTracker.getMean();
+            driftDetector.update(driftInput);
+            errorTracker.update(driftInput, 1.0);
+            boolean errorChange = driftDetector.detectedChange();
+
+            // Error is decreasing — keep things as they are, reset tracker
+            if (errorChange && errorTracker.getMean() < oldMean) {
+                errorTracker = new Var();
+                errorChange = false;
+            }
+
+            if (errorChange && alternateTree == null) {
+                errorTracker = new Var();
+                // New alternate tree starts at same depth as this branch
+                alternateTree = tree.newLeaf(depth);
+                tree.nAlternateTrees++;
+            } else if (alternateTree != null) {
+                compareAlternate(tree, parent, parentBranch);
+            }
+
+            if (alternateTree != null) {
+                alternateTree.learn(inst, tree, parent, parentBranch);
+            }
+
+            // Route to child
+            int branchIdx = getBranchIndex(inst);
+            if (branchIdx >= 0 && branchIdx < children.length && children[branchIdx] != null) {
+                children[branchIdx].learn(inst, tree, this, branchIdx);
+            } else if (this instanceof AdaNomMultiwaySplitNode) {
+                AdaNomMultiwaySplitNode multi = (AdaNomMultiwaySplitNode) this;
+                if (!inst.isMissing(multi.attrIdx)) {
+                    // New category seen — add branch dynamically
+                    int catVal = (int) inst.value(multi.attrIdx);
+                    int newBranch = multi.addCategory(catVal);
+                    children = java.util.Arrays.copyOf(children, children.length + 1);
+                    LeafNode newLeaf = tree.newLeaf(depth + 1);
+                    children[newBranch] = newLeaf;
+                    tree.nActiveLeaves++;
+                    newLeaf.learn(inst, tree, this, newBranch);
+                } else {
+                    int best = mostCommonPath();
+                    if (children[best] != null)
+                        children[best].learn(inst, tree, this, best);
+                }
+            } else if (this instanceof AdaNumMultiwaySplitNode) {
+                AdaNumMultiwaySplitNode multi = (AdaNumMultiwaySplitNode) this;
+                if (!inst.isMissing(multi.attrIdx)) {
+                    // New slot seen — add branch dynamically (mirrors NumericMultiwayBranch.add_child)
+                    int newBranch = multi.addSlot(inst.value(multi.attrIdx));
+                    children = java.util.Arrays.copyOf(children, children.length + 1);
+                    LeafNode newLeaf = tree.newLeaf(depth + 1);
+                    children[newBranch] = newLeaf;
+                    tree.nActiveLeaves++;
+                    newLeaf.learn(inst, tree, this, newBranch);
+                } else {
+                    int best = mostCommonPath();
+                    if (children[best] != null)
+                        children[best].learn(inst, tree, this, best);
+                }
+            } else {
+                // Missing feature — use most common path
+                int best = mostCommonPath();
+                if (children[best] != null)
+                    children[best].learn(inst, tree, this, best);
+            }
         }
 
         @Override
@@ -869,12 +960,75 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
             return (child != null) ? child.predict(inst, tree) : getBranchMean();
         }
 
+        // Mirrors River's AdaBranchRegressor.learn_one switch/prune logic.
         private void compareAlternate(HoeffdingAdaptiveTreeRegressor tree, Node parent, int parentBranch) {
-            
+            if (alternateTree == null) return;
+            Var altErr = alternateTree.getErrorTracker();
+            if (altErr == null)
+                return;
+
+            double altN = altErr.getN();
+            double curN = errorTracker.getN();
+
+            if (altN <= tree.driftWindowThreshold || curN <= tree.driftWindowThreshold)
+                return;
+
+            double altMean = altErr.getMean();
+            double curMean = errorTracker.getMean();
+            double altVar = altErr.get();
+            double curVar = errorTracker.get();
+
+            double denom = Math.sqrt(altVar / altN + curVar / curN);
+            if (denom < 1e-10) 
+                return;
+
+            double z = (altMean - curMean) / denom;
+            double pValue = 2.0 * NORM.cumulativeProbability(-Math.abs(z));
+
+            if (pValue > tree.switchSignificance) 
+                return;
+
+            if (altMean < curMean) {
+                // Mirrors River: tree._n_active_leaves -= self.n_leaves; += alt.n_leaves; kill_tree_children
+                tree.nActiveLeaves -= this.nLeaves();
+                tree.nActiveLeaves += alternateTree.nLeaves();
+                this.killTreeChildren(tree);
+                if (parent != null) {
+                    ((SplitNode) parent).children[parentBranch] = alternateTree;
+                } else {
+                    tree.root = alternateTree;
+                }
+                alternateTree = null;
+                tree.nSwitchAlternateTrees++;
+            } else {
+                // Mirrors River: if isinstance(DTBranch): kill_tree_children; alternate = None
+                alternateTree.killTreeChildren(tree);
+                alternateTree = null;
+                tree.nPrunedAlternateTrees++;
+            }
         }
 
-        private void killSubtree(Node n, HoeffdingAdaptiveTreeRegressor tree) {
-            
+        // Mirrors River's AdaBranchRegressor.kill_tree_children.
+        @Override
+        public void killTreeChildren(HoeffdingAdaptiveTreeRegressor tree) {
+            for (Node child : children) {
+                if (child == null) 
+                    continue;
+                if (child instanceof AdaSplitNode) {
+                    AdaSplitNode branch = (AdaSplitNode) child;
+                    if (branch.alternateTree != null) {
+                        branch.alternateTree.killTreeChildren(tree);
+                        tree.nPrunedAlternateTrees++;
+                        branch.alternateTree = null;
+                    }
+                    branch.killTreeChildren(tree);
+                } else if (child instanceof LeafNode) {
+                    if (((LeafNode) child).isActive()) 
+                        tree.nActiveLeaves--;
+                    else 
+                        tree.nInactiveLeaves--;
+                }
+            }
         }
     }
 
@@ -887,46 +1041,65 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
      * _new_leaf() which instantiates AdaLeafRegMean / AdaLeafRegModel / AdaLeafRegAdaptive.
      */
     protected LeafNode newLeaf(int depth) {
+        LeafNode leaf;
         switch (leafPrediction) {
-            case MEAN: return new AdaLeafMean(depth, adwinDelta, tebstDigits);
-            case MODEL: return new AdaLeafModel(depth, adwinDelta, tebstDigits);
-            default: return new AdaLeafAdaptive(depth, adwinDelta, tebstDigits);
+            case MEAN: leaf = new AdaLeafMean(depth, adwinDelta, tebstDigits); break;
+            case MODEL: leaf = new AdaLeafModel(depth, adwinDelta, tebstDigits, learningRate, l2, l1); break;
+            default: leaf = new AdaLeafAdaptive(depth, adwinDelta, tebstDigits, learningRate, l2, l1);
         }
+        leaf.rng = classifierRandom;
+        return leaf;
     }
 
-    protected LeafNode newLeaf(int depth, double initSumY, double initSumYSq, double initWeight) {
+    protected LeafNode newLeaf(int depth, Var initStats) {
         LeafNode leaf = newLeaf(depth);
-        leaf.sumY = initSumY;
-        leaf.sumYSq = initSumYSq;
-        leaf.weightSeen = initWeight;
-        leaf.weightSeenAtLastSplitEval = initWeight;
+        if (initStats != null) {
+            leaf.stats = initStats.plus(new Var());
+            leaf.weightSeenAtLastSplitEval = initStats.getN();
+        }
+        return leaf;
+    }
+
+    // Mirrors River's _new_leaf(initial_stats, parent=leaf): propagates leaf_model and fmse from parent.
+    protected LeafNode newLeaf(int depth, Var initStats, LeafNode parentLeaf) {
+        LeafNode leaf = newLeaf(depth, initStats);
+        if (parentLeaf instanceof AdaLeafModel && leaf instanceof AdaLeafModel) {
+            ((AdaLeafModel) leaf).leafModel = ((AdaLeafModel) parentLeaf).leafModel.clone();
+        }
+        if (parentLeaf instanceof AdaLeafAdaptive && leaf instanceof AdaLeafAdaptive) {
+            AdaLeafAdaptive src = (AdaLeafAdaptive) parentLeaf;
+            AdaLeafAdaptive dst = (AdaLeafAdaptive) leaf;
+            dst.fmseMean = src.fmseMean;
+            dst.fmseModel = src.fmseModel;
+        }
         return leaf;
     }
 
     //endregion === FACTORY METHODS ===
 
     //region === CONCRETE ADA SPLIT NODE SUBCLASSES ===
-    // (mirror River's AdaNumBinaryBranchReg, AdaNomBinaryBranchReg, AdaNomMultiwayBranchReg)
+    // (mirror River's AdaNumBinaryBranchReg, AdaNomBinaryBranchReg, AdaNomMultiwayBranchReg, AdaNumMultiwayBranchReg)
 
     public static class AdaNumBinarySplitNode extends AdaSplitNode {
-        private final int    attrIdx;
+        private final int attrIdx;
         private final double threshold;
 
         public AdaNumBinarySplitNode(int depth, int attrIdx, double threshold, double adwinDelta) {
             super(2, depth, adwinDelta);
-            this.attrIdx   = attrIdx;
+            this.attrIdx = attrIdx;
             this.threshold = threshold;
         }
 
         @Override
         public int getBranchIndex(Instance inst) {
-            if (inst.isMissing(attrIdx)) return -1;
+            if (inst.isMissing(attrIdx)) 
+                return -1;
             return inst.value(attrIdx) <= threshold ? 0 : 1;
         }
     }
 
     public static class AdaNomBinarySplitNode extends AdaSplitNode {
-        private final int          attrIdx;
+        private final int attrIdx;
         private final Set<Integer> leftCats;
         private final Set<Integer> rightCats;
 
@@ -939,10 +1112,13 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
         @Override
         public int getBranchIndex(Instance inst) {
-            if (inst.isMissing(attrIdx)) return -1;
+            if (inst.isMissing(attrIdx)) 
+                return -1;
             int cat = (int) inst.value(attrIdx);
-            if (leftCats.contains(cat))  return 0;
-            if (rightCats.contains(cat)) return 1;
+            if (leftCats.contains(cat))  
+                return 0;
+            if (rightCats.contains(cat)) 
+                return 1;
             return -1;
         }
     }
@@ -978,19 +1154,155 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         }
     }
 
+    // Mirrors River's AdaNumMultiwayBranchReg + NumericMultiwayBranch.
+    // Slots are computed as floor(x / radius); each slot maps to a branch index.
+    // New slots seen at learn-time are added dynamically (mirrors add_child).
+    public static class AdaNumMultiwaySplitNode extends AdaSplitNode {
+        final int attrIdx;
+        final double radius;
+        private final Map<Integer, Integer> slotToBranch;
+        private final Map<Integer, Integer> branchToSlot;
+
+        public AdaNumMultiwaySplitNode(int depth, int attrIdx, double radius, int[] initialSlotIds, double adwinDelta) {
+            super(initialSlotIds.length, depth, adwinDelta);
+            this.attrIdx      = attrIdx;
+            this.radius       = radius;
+            this.slotToBranch = new HashMap<>();
+            this.branchToSlot = new HashMap<>();
+            for (int i = 0; i < initialSlotIds.length; i++) {
+                slotToBranch.put(initialSlotIds[i], i);
+                branchToSlot.put(i, initialSlotIds[i]);
+            }
+        }
+
+        @Override
+        public int getBranchIndex(Instance inst) {
+            if (inst.isMissing(attrIdx)) return -1;
+            int slot = (int) Math.floor(inst.value(attrIdx) / radius);
+            Integer branch = slotToBranch.get(slot);
+            return branch != null ? branch : -1;
+        }
+
+        public int addSlot(double featureVal) {
+            int slot   = (int) Math.floor(featureVal / radius);
+            int branch = slotToBranch.size();
+            slotToBranch.put(slot, branch);
+            branchToSlot.put(branch, slot);
+            return branch;
+        }
+    }
+
     //endregion === CONCRETE ADA SPLIT NODE SUBCLASSES ===
+
+    //region === SPLITTER INTERFACE ===
+
+    // Mirrors River's Splitter base class: uniform update + best_evaluated_split_suggestion.
+    public interface Splitter {
+        void update(double attVal, double y, double w);
+        SplitSuggestion bestEvaluatedSplitSuggestion(Var preSplit, int attrIdx, boolean binaryOnly, int minSamples);
+        default void removeBadSplits(double lastCheckRatio, double lastCheckVR, double lastCheckE, int minSamplesSplit, Var preSplit) {}
+    }
+
+    //endregion === SPLITTER INTERFACE ===
 
     //region === NOMINAL SPLITTER ====
 
-    public static class NominalSplitter {
+    public static class NominalSplitter implements Splitter {
 
-        private final Map<Integer, double[]> catStats = new HashMap<>();
+        private final Map<Integer, Var> catStats = new HashMap<>();
 
-        public void update(int catIndex, double y, double w) {
+        @Override
+        public void update(double attVal, double y, double w) {
+            catStats.computeIfAbsent((int) attVal, k -> new Var()).update(y, w);
         }
 
-        public double[] bestSplit(double parentVariance, double totalSumY, double totalSumYSq, double totalCount, int minSamplesSplit) {
-            return new double[]{};
+        @Override
+        public SplitSuggestion bestEvaluatedSplitSuggestion(Var preSplit, int attrIdx, boolean binaryOnly, int minSamples) {
+            SplitCandidate res = binaryOnly ? bestBinarySplit(preSplit, minSamples) : bestSplit(preSplit, minSamples);
+            if (res == null) return null;
+            SplitSuggestion s = new SplitSuggestion();
+            s.merit = res.merit;
+            s.feature = attrIdx;
+            s.numericalFeature = false;
+            s.multiwaySplit = !binaryOnly && res.multiwaySplit;
+            s.childrenStats = res.postSplitDists;
+            if (!binaryOnly && res.multiwaySplit) {
+                s.sortedCats = getSortedCategories();
+            } else {
+                int[][] parts = getBinarySplitCategories(res.splitCatIdx);
+                s.leftSet = new HashSet<>();
+                s.rightSet = new HashSet<>();
+                for (int c : parts[0]) s.leftSet.add(c);
+                for (int c : parts[1]) s.rightSet.add(c);
+            }
+            return s;
+        }
+
+        // Returns best split: tries multiway (when > 2 categories) and all one-vs-rest binary splits.
+        // Sets multiwaySplit=true on the result when the multiway option wins.
+        public SplitCandidate bestSplit(Var preSplit, int minSamplesSplit) {
+            if (catStats.size() < 2) return null;
+            SplitCandidate best = new SplitCandidate();
+
+            // Multiway: all categories as separate branches
+            if (catStats.size() > 2) {
+                int[] sorted = getSortedCategories();
+                Var[] dists = new Var[sorted.length];
+                boolean enough = true;
+                for (int i = 0; i < sorted.length; i++) {
+                    dists[i] = catStats.get(sorted[i]);
+                    if (dists[i].getN() < minSamplesSplit) { enough = false; break; }
+                }
+                if (enough) {
+                    double merit = varianceReductionMulti(preSplit, dists);
+                    if (merit > best.merit) {
+                        best.merit = merit;
+                        best.postSplitDists = dists;
+                        best.splitCatIdx = -1;
+                        best.multiwaySplit = true;
+                    }
+                }
+            }
+
+            // Binary: category X vs rest
+            for (Map.Entry<Integer, Var> entry : catStats.entrySet()) {
+                Var leftDist = entry.getValue();
+                if (leftDist.getN() < minSamplesSplit) continue;
+                Var rightDist = preSplit.minus(leftDist);
+                if (rightDist.getN() < minSamplesSplit) continue;
+                double merit = varianceReduction(preSplit, leftDist, rightDist);
+                if (merit > best.merit) {
+                    best.merit = merit;
+                    best.postSplitDists = new Var[]{ leftDist, rightDist };
+                    best.splitCatIdx = entry.getKey();
+                    best.multiwaySplit = false;
+                }
+            }
+
+            if (best.merit <= 0 || best.postSplitDists == null) return null;
+            return best;
+        }
+
+        public SplitCandidate bestBinarySplit(Var preSplit, int minSamplesSplit) {
+            if (catStats.size() < 2) return null;
+            SplitCandidate best = new SplitCandidate();
+
+            for (Map.Entry<Integer, Var> entry : catStats.entrySet()) {
+                Var leftDist = entry.getValue();
+                if (leftDist.getN() < minSamplesSplit) continue;
+                Var rightDist = preSplit.minus(leftDist);
+                if (rightDist.getN() < minSamplesSplit) continue;
+                double merit = varianceReduction(preSplit, leftDist, rightDist);
+                if (merit > best.merit) {
+                    best.merit = merit;
+                    best.postSplitDists = new Var[]{ leftDist, rightDist };
+                    best.splitCatIdx = entry.getKey();
+                    best.multiwaySplit = false;
+                }
+            }
+
+            if (best.merit <= 0 || best.postSplitDists == null) return null;
+            return best;
         }
 
         public int[] getSortedCategories() {
@@ -1001,32 +1313,109 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
             return cats;
         }
 
-        public double[] bestBinarySplit(double parentVariance, double totalSumY, double totalSumYSq, double totalCount, int minSamplesSplit) {
-            return new double[]{};
+        // Returns {leftCats, rightCats} for the binary split on splitCat (left={splitCat}, right=rest).
+        public int[][] getBinarySplitCategories(int splitCat) {
+            List<Integer> right = new ArrayList<>();
+            for (int cat : catStats.keySet()) {
+                if (cat != splitCat) right.add(cat);
+            }
+            int[] rightArr = new int[right.size()];
+            for (int i = 0; i < right.size(); i++) rightArr[i] = right.get(i);
+            return new int[][]{ new int[]{ splitCat }, rightArr };
         }
 
-        public int[][] getBinarySplitCategories(int splitIndex) {
-            return new int[][]{};
+        public Var[] getChildrenStats(int[] sortedCats) {
+            Var[] stats = new Var[sortedCats.length];
+            for (int i = 0; i < sortedCats.length; i++)
+                stats[i] = catStats.getOrDefault(sortedCats[i], new Var());
+            return stats;
         }
 
-        public double[][] getChildrenStats(int[] sortedCats) {
-            return new double[sortedCats.length][];
+        private static double varianceReduction(Var parent, Var left, Var right) {
+            double n = parent.getN();
+            if (n == 0) 
+                return 0;
+            return parent.get() - (left.getN() / n * left.get() + right.getN() / n * right.get());
+        }
+
+        private static double varianceReductionMulti(Var parent, Var[] children) {
+            double n = parent.getN();
+            if (n == 0) 
+                return 0;
+            double contrib = 0;
+            for (Var c : children) contrib += c.getN() / n * c.get();
+            return parent.get() - contrib;
         }
     }
 
     //endregion === NOMINAL SPLITTER ===
 
+    //region === SPLIT CANDIDATE ===
+
+    public static final class SplitCandidate {
+        public double merit = Double.NEGATIVE_INFINITY;
+        public double splitVal = Double.NaN;
+        public Var[]  postSplitDists = null;
+        public int    splitCatIdx = -1;
+        public boolean multiwaySplit = false;
+    }
+
+    //endregion === SPLIT CANDIDATE ===
+
+    //region === SPLIT SUGGESTION ===
+
+    // Mirrors River's BranchFactory: wraps a split candidate with attribute identity,
+    // children distributions, and provides assemble() to build the AdaSplitNode.
+    public static final class SplitSuggestion implements Comparable<SplitSuggestion> {
+        static final SplitSuggestion NULL = new SplitSuggestion(); // merit_preprune null split
+
+        double merit = Double.NEGATIVE_INFINITY;
+        int feature = -1;         // -1 = null split (River: feature=None)
+        boolean numericalFeature;
+        boolean multiwaySplit;
+        Var[] childrenStats;
+        double splitVal;           // numeric binary
+        Set<Integer> leftSet;      // nominal binary
+        Set<Integer> rightSet;     // nominal binary
+        int[] sortedCats;          // nominal multiway
+        double radius;             // numeric multiway
+        int[] slotIds;             // numeric multiway
+
+        @Override
+        public int compareTo(SplitSuggestion o) {
+            return Double.compare(this.merit, o.merit);
+        }
+
+        // Mirrors River's split_decision.assemble(branch, leaf.stats, leaf.depth, *leaves, **kwargs).
+        AdaSplitNode assemble(int depth, double adwinDelta) {
+            if (numericalFeature && multiwaySplit)
+                return new AdaNumMultiwaySplitNode(depth, feature, radius, slotIds, adwinDelta);
+            if (numericalFeature)
+                return new AdaNumBinarySplitNode(depth, feature, splitVal, adwinDelta);
+            if (multiwaySplit)
+                return new AdaNomMultiwaySplitNode(depth, feature, sortedCats, adwinDelta);
+            return new AdaNomBinarySplitNode(depth, feature, leftSet, rightSet, adwinDelta);
+        }
+    }
+
+    //endregion === SPLIT SUGGESTION ===
+
     //region === TEBST SPLITTER ===
 
-    public static class TEBSTSplitter {
+    public static class TEBSTSplitter implements Splitter {
 
         private final double roundFactor;
         private EBSTNode root = null;
 
-        public TEBSTSplitter(int digits) { this.roundFactor = Math.pow(10, digits); }
+        public TEBSTSplitter(int digits) {
+            this.roundFactor = Math.pow(10, digits);
+        }
 
-        private double round(double v) { return Math.round(v * roundFactor) / roundFactor; }
+        private double round(double v) {
+            return Math.round(v * roundFactor) / roundFactor;
+        }
 
+        @Override
         public void update(double attVal, double y, double w) {
             attVal = round(attVal);
             if (root == null)
@@ -1043,27 +1432,108 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
                 root.insertValue(attVal, target, w);
         }
 
-        public double[] bestSplit(double parentVariance, double totalSumY, double totalSumYSq, double totalCount, int minSamplesSplit) {
-            if (root == null || totalCount < 2 * minSamplesSplit) return null;
-            double[] result = {Double.NaN, 0.0, 0.0, 0.0, 0.0, 0.0}; // result[3..5] sono le left-branch stats al momento del best threshold trovato.
-            double[] aux    = {0.0, 0.0, 0.0};
-            findBestSplit(root, result, aux, parentVariance, totalSumY, totalSumYSq, totalCount, minSamplesSplit);
-            return Double.isNaN(result[0]) ? null : result;
+        @Override
+        public SplitSuggestion bestEvaluatedSplitSuggestion(Var preSplit, int attrIdx, boolean binaryOnly, int minSamples) {
+            SplitCandidate res = bestSplit(preSplit, minSamples);
+            if (res == null) return null;
+            SplitSuggestion s = new SplitSuggestion();
+            s.merit = res.merit;
+            s.feature = attrIdx;
+            s.numericalFeature = true;
+            s.splitVal = res.splitVal;
+            s.childrenStats = new Var[]{ res.postSplitDists[0], preSplit.minus(res.postSplitDists[0]) };
+            return s;
         }
 
-        private void findBestSplit(EBSTNode node, double[] result, double[] aux, double pVar, double tY, double tYSq, double tN, int minSplit) {
+        public SplitCandidate bestSplit(Var preSplit, int minSamplesSplit) {
+            if (root == null || preSplit.getN() < 2 * minSamplesSplit) 
+                return null;
+            SplitCandidate best = new SplitCandidate();
+            findBestSplit(root, best, new Var(), preSplit, minSamplesSplit);
+            if (Double.isNaN(best.splitVal) || best.merit <= 0)
+                return null;
+            return best;
         }
 
-        public void removeBadSplits(double lastCheckRatio, double lastCheckVR, double epsilon, double parentVariance, double totalSumY, double totalSumYSq, double totalCount) {
-            if (root == null || lastCheckVR <= 0) return;
-            double[] aux = {0.0, 0.0, 0.0};
-            root = removeNode(root, aux, lastCheckRatio, lastCheckVR, epsilon, parentVariance, totalSumY, totalSumYSq, totalCount);
+        // In-order traversal mirroring River's EBSTSplitter._find_best_split.
+        // aux accumulates the combined estimator of all nodes whose right subtree
+        // is currently being explored (Chan's parallel variance formula).
+        private void findBestSplit(EBSTNode node, SplitCandidate best, Var aux, Var preSplit, int minSplit) {
+            if (node.left != null)
+                findBestSplit(node.left, best, aux, preSplit, minSplit);
+
+            Var leftDist = node.estimator.plus(aux);
+            Var rightDist = preSplit.minus(leftDist);
+
+            if (leftDist.getN() >= minSplit && rightDist.getN() >= minSplit) {
+                double merit = varianceReduction(preSplit, leftDist, rightDist);
+                if (merit > best.merit) {
+                    best.merit = merit;
+                    best.splitVal = node.attVal;
+                    best.postSplitDists = new Var[]{ leftDist, rightDist };
+                }
+            }
+
+            if (node.right != null) {
+                aux.addInPlace(node.estimator);
+                findBestSplit(node.right, best, aux, preSplit, minSplit);
+                aux.subtractInPlace(node.estimator);
+            }
         }
 
-        private EBSTNode removeNode(EBSTNode node, double[] aux, double ratio, double bestVR, double eps, double pVar, double tY, double tYSq, double tN) {
-            if (node == null) return null;
+        @Override
+        public void removeBadSplits(double lastCheckRatio, double lastCheckVR, double epsilon, int minSamplesSplit, Var preSplit) {
+            if (root == null || lastCheckVR <= 0) 
+                return;
+            root = removeBadSplitNodes(root, new Var(), preSplit, lastCheckRatio, lastCheckVR, epsilon, minSamplesSplit);
+        }
+
+        // Post-order pruning mirroring River's EBSTSplitter._remove_bad_split_nodes.
+        // Returns null if the node (and its subtree) was pruned, otherwise the node.
+        private EBSTNode removeBadSplitNodes(EBSTNode node, Var aux, Var preSplit, double lastCheckRatio, double lastCheckVR, double lastCheckE, int minSamplesSplit) {
+            if (node == null) 
+                return null;
+
+            boolean isBad;
+            if (node.left != null) {
+                node.left = removeBadSplitNodes(node.left, aux, preSplit, lastCheckRatio, lastCheckVR, lastCheckE, minSamplesSplit);
+                isBad = (node.left == null);
+            } else {
+                isBad = true;
+            }
+
+            if (isBad) {
+                if (node.right != null) {
+                    aux.addInPlace(node.estimator);
+                    node.right = removeBadSplitNodes(node.right, aux, preSplit, lastCheckRatio, lastCheckVR, lastCheckE, minSamplesSplit);
+                    aux.subtractInPlace(node.estimator);
+                    isBad = (node.right == null);
+                } else {
+                    isBad = true;
+                }
+            }
+
+            if (isBad) {
+                Var leftDist = node.estimator.plus(aux);
+                Var rightDist = preSplit.minus(leftDist);
+                // Mirrors River's merit_of_split: returns 0 when any branch has < min_samples_split
+                double merit = 0.0;
+                if (leftDist.getN() >= minSamplesSplit && rightDist.getN() >= minSamplesSplit)
+                    merit = varianceReduction(preSplit, leftDist, rightDist);
+                if (merit / lastCheckVR < lastCheckRatio - 2 * lastCheckE)
+                    return null;
+            }
+
             return node;
         }
+
+        private static double varianceReduction(Var parent, Var left, Var right) {
+            double n = parent.getN();
+            if (n == 0) 
+                return 0;
+            return parent.get() - (left.getN() / n * left.get() + right.getN() / n * right.get());
+        }
+
     }
 
     //endregion === TEBST SPLITTER ===
@@ -1085,6 +1555,72 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         public double getMean() { return mean; }
         public double getN() { return n; }
         public double get() { return n > 1.0 ? S / (n - 1.0) : 0.0; }
+
+        /** Chan's parallel algorithm: returns a new Var = this + other. */
+        public Var plus(Var other) {
+            if (this.n == 0) 
+                return other.copy();
+            if (other.n == 0) 
+                return this.copy();
+            Var r = new Var();
+            r.n = this.n + other.n;
+            double delta = other.mean - this.mean;
+            r.mean = (this.n * this.mean + other.n * other.mean) / r.n;
+            r.S = this.S + other.S + delta * delta * (this.n * other.n / r.n);
+            return r;
+        }
+
+        /** Returns a new Var = this - other (removes other's contribution from this). */
+        public Var minus(Var other) {
+            if (other.n == 0) 
+                return this.copy();
+            double nA = this.n - other.n;
+            if (nA <= 0) 
+                return new Var();
+            Var r = new Var();
+            r.n = nA;
+            r.mean = (this.n * this.mean - other.n * other.mean) / nA;
+            double delta = other.mean - r.mean;
+            r.S = Math.max(0.0, this.S - other.S - delta * delta * (nA * other.n / this.n));
+            return r;
+        }
+
+        /** In-place: this += other. */
+        public void addInPlace(Var other) {
+            if (other.n == 0) 
+                return;
+            double newN = this.n + other.n;
+            double delta = other.mean - this.mean;
+            S += other.S + delta * delta * (this.n * other.n / newN);
+            mean = (this.n * this.mean + other.n * other.mean) / newN;
+            n = newN;
+        }
+
+        /** In-place: this -= other (removes other's contribution). */
+        public void subtractInPlace(Var other) {
+            if (other.n == 0) 
+                return;
+            double nC = this.n;
+            double nA = nC - other.n;
+            if (nA <= 0) { 
+                n = 0; mean = 0; 
+                S = 0; 
+                return; 
+            }
+            double meanA = (nC * this.mean - other.n * other.mean) / nA;
+            double delta = other.mean - meanA;
+            S = Math.max(0.0, this.S - other.S - delta * delta * (nA * other.n / nC));
+            mean = meanA;
+            n = nA;
+        }
+
+        private Var copy() {
+            Var v = new Var(); 
+            v.n = n; 
+            v.mean = mean; 
+            v.S = S; 
+            return v;
+        }
     }
 
     //endregion === VAR ===
@@ -1192,6 +1728,15 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
         public int getNumWeights() { return weights.size(); }
 
+        public LinearModel clone() {
+            LinearModel m = new LinearModel(lr, l2, l1);
+            m.weights.putAll(weights);
+            m.cumL1map.putAll(cumL1map);
+            m.maxCumL1 = maxCumL1;
+            m.bias = bias;
+            return m;
+        }
+
         public double predict(Instance inst) {
             double p = bias;
             for (int j = 0; j < inst.numValues(); j++) {
@@ -1236,7 +1781,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
     //endregion === LINEAR MODEL  (SGD, aligned to River's LinearRegression defaults) ===
 
-    //region === ADWIN DETECTOR ===
+    //region === ADWIN DETECTOR (port of River's adwin_c.pyx AdaptiveWindowing) ===
 
     public interface DriftDetector {
         void update(double value);
@@ -1246,36 +1791,193 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
     public static class ADWINDetector implements DriftDetector {
         private final double delta;
-        private ADWIN adwin;
+        private final int clock;
+        private final int maxBuckets;
+        private final int minWindowLength;
+        private final int gracePeriod;
+
+        private double total = 0.0;
+        private double variance = 0.0;
+        private double width = 0.0;
+        private int tick = 0;
         private boolean changed = false;
 
-        public ADWINDetector(double delta) { this.delta = delta; this.adwin = new ADWIN(delta); }
+        // index 0 = newest level (level 0), last index = oldest level
+        private final ArrayList<BucketRow> buckets = new ArrayList<>();
 
-        @Override public void update(double v) { changed = adwin.setInput(v); }
+        public ADWINDetector(double delta) {
+            this(delta, 32, 5, 5, 10);
+        }
+
+        public ADWINDetector(double delta, int clock, int maxBuckets, int minWindowLength, int gracePeriod) {
+            this.delta = delta;
+            this.clock = clock;
+            this.maxBuckets = maxBuckets;
+            this.minWindowLength = minWindowLength;
+            this.gracePeriod = gracePeriod;
+            buckets.add(new BucketRow(maxBuckets));
+        }
+
+        @Override
+        public void update(double value) {
+            insertElement(value, 0.0);
+            changed = detectChange();
+        }
+
         @Override public boolean detectedChange() { return changed; }
-        @Override public void reset() { adwin = new ADWIN(delta); changed = false; }
+
+        @Override
+        public void reset() {
+            total = 0.0; variance = 0.0; width = 0.0;
+            tick = 0; changed = false;
+            buckets.clear();
+            buckets.add(new BucketRow(maxBuckets));
+        }
+
+        private void insertElement(double value, double variance) {
+            buckets.get(0).insertData(value, variance);
+            if (width > 1.0) {
+                double prevTotal = this.total;
+                double prevWidth = this.width;
+                this.variance += (prevWidth - 1.0) * (value - prevTotal / (prevWidth - 1.0))
+                    * (value - prevTotal / (prevWidth - 1.0)) / prevWidth;
+            }
+            width += 1.0;
+            total += value;
+            compressBuckets();
+        }
+
+        private double deleteElement() {
+            int lastIdx = buckets.size() - 1;
+            BucketRow bucket = buckets.get(lastIdx);
+            double n = Math.pow(2, lastIdx);
+            double u = bucket.getTotal(0);
+            double mu = u / n;
+            double v = bucket.getVariance(0);
+
+            width -= n;
+            total -= u;
+            double muWindow = width > 0 ? total / width : 0.0;
+            variance -= v + n * width * (mu - muWindow) * (mu - muWindow) / (n + width);
+
+            bucket.remove();
+            if (bucket.currentIdx == 0) buckets.remove(lastIdx);
+            return n;
+        }
+
+        private void compressBuckets() {
+            for (int idx = 0; idx < buckets.size(); idx++) {
+                BucketRow bucket = buckets.get(idx);
+                if (bucket.currentIdx != maxBuckets + 1) break;
+                if (idx + 1 >= buckets.size()) buckets.add(new BucketRow(maxBuckets));
+                BucketRow next = buckets.get(idx + 1);
+                double n1 = Math.pow(2, idx);
+                double n2 = n1;
+                double mu1 = bucket.getTotal(0) / n1;
+                double mu2 = bucket.getTotal(1) / n2;
+                double total12 = bucket.getTotal(0) + bucket.getTotal(1);
+                double v12 = bucket.getVariance(0) + bucket.getVariance(1)
+                    + n1 * n2 * (mu1 - mu2) * (mu1 - mu2) / (n1 + n2);
+                next.insertData(total12, v12);
+                bucket.compress(2);
+                if (next.currentIdx <= maxBuckets) break;
+            }
+        }
+
+        private boolean detectChange() {
+            boolean changeDetected = false;
+            tick++;
+            if (tick % clock != 0 || width <= gracePeriod) return false;
+
+            boolean reduceWidth = true;
+            while (reduceWidth) {
+                reduceWidth = false;
+                double n0 = 0.0, n1 = width;
+                double u0 = 0.0, u1 = total;
+                boolean exitFlag = false;
+
+                for (int i = buckets.size() - 1; i >= 0 && !exitFlag; i--) {
+                    BucketRow bucket = buckets.get(i);
+                    for (int k = 0; k < bucket.currentIdx; k++) {
+                        double n2 = Math.pow(2, i);
+                        double u2 = bucket.getTotal(k);
+
+                        n0 += n2; 
+                        n1 -= n2;
+                        u0 += u2; 
+                        u1 -= u2;
+
+                        if (i == 0 && k == bucket.currentIdx - 1) {
+                            exitFlag = true;
+                            break;
+                        }
+
+                        if (n1 >= minWindowLength && n0 >= minWindowLength) {
+                            double deltaMean = (u0 / n0) - (u1 / n1);
+                            if (evaluateCut(n0, n1, deltaMean)) {
+                                reduceWidth = true;
+                                changeDetected = true;
+                                if (width > 0) {
+                                    n0 -= deleteElement();
+                                    exitFlag = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return changeDetected;
+        }
+
+        private boolean evaluateCut(double n0, double n1, double deltaMean) {
+            if (width <= 0) 
+                return false;
+            double varianceInWindow = variance / width;
+            double deltaPrime = Math.log(2.0 * Math.log(width) / delta);
+            if (deltaPrime <= 0) 
+                return false;
+            double mRecip = 1.0 / (n0 - minWindowLength + 1) + 1.0 / (n1 - minWindowLength + 1);
+            double epsilon = Math.sqrt(2.0 * mRecip * varianceInWindow * deltaPrime)
+                + 2.0 / 3.0 * deltaPrime * mRecip;
+            return Math.abs(deltaMean) > epsilon;
+        }
+
+        private static class BucketRow {
+            private final double[] totals;
+            private final double[] variances;
+            int currentIdx = 0;
+
+            BucketRow(int maxSize) {
+                totals = new double[maxSize + 1];
+                variances = new double[maxSize + 1];
+            }
+
+            void insertData(double value, double variance) {
+                totals[currentIdx] = value;
+                variances[currentIdx] = variance;
+                currentIdx++;
+            }
+
+            double getTotal(int idx) { return totals[idx]; }
+            double getVariance(int idx) { return variances[idx]; }
+
+            void remove() { compress(1); }
+
+            void compress(int n) {
+                for (int i = n; i < totals.length; i++) {
+                    totals[i - n] = totals[i];
+                    variances[i - n] = variances[i];
+                }
+                for (int i = totals.length - n; i < totals.length; i++) {
+                    totals[i] = 0.0;
+                    variances[i] = 0.0;
+                }
+                currentIdx -= n;
+            }
+        }
     }
 
     //endregion === ADWIN DETECTOR ===
  
-    //region === ERROR ESTIMATOR  (Welford online mean + variance) ===
-
-    public static class ErrorEstimator {
-        private double mean = 0, M2 = 0;
-        private int n = 0;
-
-        public void update(double v) {
-            n++;
-            double delta = v - mean; 
-            mean += delta / n; 
-            M2 += delta * (v - mean);
-        }
-
-        public double getMean() { return mean; }
-        public double getVariance() { return n < 2 ? 0 : Math.max(0, M2 / (n - 1)); }
-        public int getCount() { return n; }
-        public void reset() { mean = 0; M2 = 0; n = 0; }
-    }
-
-    //endregion === ERROR ESTIMATOR  (Welford online mean + variance) ===
 }
