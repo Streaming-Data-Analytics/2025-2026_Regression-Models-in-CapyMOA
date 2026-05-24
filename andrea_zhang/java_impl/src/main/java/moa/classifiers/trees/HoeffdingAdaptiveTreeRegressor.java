@@ -4,10 +4,12 @@ import com.github.javacliparser.FlagOption;
 import com.github.javacliparser.FloatOption;
 import com.github.javacliparser.IntOption;
 import com.github.javacliparser.MultiChoiceOption;
+import com.github.javacliparser.StringOption;
 import com.yahoo.labs.samoa.instances.Instance;
 
 import moa.classifiers.AbstractClassifier;
 import moa.classifiers.Regressor;
+import moa.classifiers.core.driftdetection.ADWIN;
 import moa.core.Measurement;
 import moa.core.SizeOf;
 
@@ -57,14 +59,16 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
                 "Adaptive: chooses between MEAN and MODEL via FMSE tracking"
             }, 2); // default: ADAPTIVE
 
-    // no leaf model, è un LinearRegressor all'interno di questa classe 
-
     public FloatOption modelSelectorDecayOption = new FloatOption(
             "modelSelectorDecay", 'q',
             "Exponential decay factor for FMSE tracking in ADAPTIVE leaf mode.",
             0.95, 0.0, 1.0);
     
-    // lista nominal attributes ??
+    public StringOption nominalAttributesOption = new StringOption(
+            "nominalAttributes", 'n',
+            "Comma-separated list of 0-based attribute indices to treat as nominal "
+            + "(River: nominal_attributes=[...]). Empty string means use schema type only.",
+            "");
 
     public IntOption minSamplesSplitOption = new IntOption(
             "minSamplesSplit", 'm',
@@ -176,8 +180,8 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
     protected int memoryEstimatePeriod;
     protected double adwinDelta;
     protected boolean meritPreprune;
+    protected Set<Integer> nominalAttributeIndices;
     //endregion === Convenience fields read from options at reset time ===
-
 
     public enum LeafPrediction { MEAN, MODEL, ADAPTIVE }
 
@@ -218,6 +222,18 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         memoryEstimatePeriod = memoryEstimatePeriodOption.getValue();
         adwinDelta = adwinDeltaOption.getValue();
         meritPreprune = !noPrePruneOption.isSet();
+
+        String nomStr = nominalAttributesOption.getValue().trim();
+        if (nomStr.isEmpty()) {
+            nominalAttributeIndices = null;
+        } else {
+            nominalAttributeIndices = new HashSet<>();
+            for (String token : nomStr.split(",")) {
+                String t = token.trim();
+                if (!t.isEmpty())
+                    nominalAttributeIndices.add(Integer.parseInt(t));
+            }
+        }
 
         switch (leafPredictionOption.getChosenIndex()) {
             case 0: leafPrediction = LeafPrediction.MEAN;  break;
@@ -331,8 +347,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         double maxBytes = maxSizeMiB * 1024.0 * 1024.0;
 
         // Mirrors River: enter only when inactive leaves exist or size is exceeded
-        double treeSize = sizeEstimateOverhead
-            * (nActiveLeaves * activeLeafSizeEstimate + nInactiveLeaves * inactiveLeafSizeEstimate);
+        double treeSize = sizeEstimateOverhead * (nActiveLeaves * activeLeafSizeEstimate + nInactiveLeaves * inactiveLeafSizeEstimate);
         if (nInactiveLeaves == 0 && treeSize <= maxBytes) 
             return;
 
@@ -342,8 +357,10 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         }
 
         List<LeafNode> leaves = new ArrayList<>();
-        if (root != null) root.collectAllLeaves(leaves);
-        if (leaves.isEmpty()) return;
+        if (root != null) 
+            root.collectAllLeaves(leaves);
+        if (leaves.isEmpty()) 
+            return;
         leaves.sort(java.util.Comparator.comparingDouble(LeafNode::calculatePromise));
 
         // Find the maximum number of active leaves that fits in the budget
@@ -433,8 +450,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
                 bestSplitSuggestions.size() >= 2
                 && bestSplitSuggestions.get(bestSplitSuggestions.size() - 1).merit > 0
                 && bestSplitSuggestions.get(bestSplitSuggestions.size() - 2).merit > 0) {
-            double lastCheckRatio = bestSplitSuggestions.get(bestSplitSuggestions.size() - 2).merit
-                / bestSplitSuggestions.get(bestSplitSuggestions.size() - 1).merit;
+            double lastCheckRatio = bestSplitSuggestions.get(bestSplitSuggestions.size() - 2).merit / bestSplitSuggestions.get(bestSplitSuggestions.size() - 1).merit;
             double lastCheckVR = bestSplitSuggestions.get(bestSplitSuggestions.size() - 1).merit;
             leaf.manageMemory(lastCheckRatio, lastCheckVR, hb, minSamplesSplit);
         }
@@ -472,7 +488,6 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         public abstract double predict(Instance inst, HoeffdingAdaptiveTreeRegressor tree);
         public Var getErrorTracker() { return null; }
         public abstract void collectLeaves(Instance inst, List<Node> result);
-        public abstract void collectAllActiveLeaves(List<LeafNode> result);
         public abstract void collectAllLeaves(List<LeafNode> result);
         // Mirrors River's total_weight and n_leaves properties.
         public abstract double totalWeight();
@@ -504,8 +519,9 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         protected double weightSeenAtLastSplitEval = 0;
 
         // ADWIN + error tracker live here because learn() uses them
-        protected ADWINDetector driftDetector;
+        protected ADWIN driftDetector;
         protected Var errorTracker;
+        private double maxObservedError = 1.0;
 
         /** Per-attribute splitters (numeric: TEBSTSplitter, nominal: NominalSplitter); null → inactive. */
         protected Map<Integer, Splitter> splitters = null;
@@ -520,7 +536,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         public LeafNode(int depth, double adwinDelta, int tebstDigits) {
             super(depth);
             this.tebstDigits = tebstDigits;
-            this.driftDetector = new ADWINDetector(adwinDelta);
+            this.driftDetector = new ADWIN(adwinDelta);
             this.errorTracker = new Var();
             this.splitters = new HashMap<>();
         }
@@ -543,7 +559,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         }
 
         // Mirrors River's HTLeaf.learn_one: update_stats then update_splitters.
-        private void updateStatsBase(Instance inst, double w) {
+        private void updateStatsBase(Instance inst, double w, HoeffdingAdaptiveTreeRegressor tree) {
             double y = inst.classValue();
             stats.update(y, w);
             if (isActive()) {
@@ -551,7 +567,8 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
                 for (int i = 0; i < numAttrs; i++) {
                     if (disabledAttrs.contains(i) || inst.isMissing(i))
                         continue;
-                    boolean isNom = inst.attribute(i).isNominal();
+                    boolean isNom = inst.attribute(i).isNominal()
+                        || (tree.nominalAttributeIndices != null && tree.nominalAttributeIndices.contains(i));
                     splitters.computeIfAbsent(i, k -> isNom ? new NominalSplitter() : new TEBSTSplitter(tebstDigits)).update(inst.value(i), y, w);
                 }
             }
@@ -564,7 +581,6 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         @Override public int nLeaves() { return 1; }
 
         @Override public void collectLeaves(Instance inst, List<Node> result) { result.add(this); }
-        @Override public void collectAllActiveLeaves(List<LeafNode> result) { if (isActive()) result.add(this); }
         @Override public void collectAllLeaves(List<LeafNode> result) { result.add(this); }
 
         // Hook: called BEFORE updateStatsBase() — mirrors River's LeafAdaptive.learn_one (FMSE update).
@@ -596,9 +612,10 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
             // Drift detection + error tracking
             double error = Math.abs(y - y_pred);
             double oldMean = errorTracker.getMean();
-            driftDetector.update(error);
+            maxObservedError = Math.max(maxObservedError, error);
+            driftDetector.setInput(error / maxObservedError);
             errorTracker.update(error, 1.0);
-            if (driftDetector.detectedChange() && errorTracker.getMean() < oldMean)
+            if (driftDetector.getChange() && errorTracker.getMean() < oldMean)
                 errorTracker = new Var();
 
             double preMean = getMean();
@@ -607,7 +624,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
             beforeUpdate(inst, w, y, preMean, tree);
 
             // River: HTLeaf.learn_one — stats + splitters update
-            updateStatsBase(inst, w);
+            updateStatsBase(inst, w, tree);
 
             // River: LeafModel.learn_one — model update
             afterUpdate(inst, w, y, preMean, tree);
@@ -739,7 +756,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         protected void beforeUpdate(Instance inst, double w, double y, double preMean, HoeffdingAdaptiveTreeRegressor tree) {
             double preModel = leafModel.predict(inst);
             double d = tree.modelSelectorDecay;
-            fmseMean  = d * fmseMean  + (y - preMean)  * (y - preMean);
+            fmseMean = d * fmseMean + (y - preMean) * (y - preMean);
             fmseModel = d * fmseModel + (y - preModel) * (y - preModel);
         }
 
@@ -805,13 +822,6 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         }
 
         @Override
-        public void collectAllActiveLeaves(List<LeafNode> result) {
-            for (Node child : children)
-                if (child != null)
-                    child.collectAllActiveLeaves(result);
-        }
-
-        @Override
         public void collectAllLeaves(List<LeafNode> result) {
             for (Node child : children)
                 if (child != null)
@@ -825,15 +835,16 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
     public abstract static class AdaSplitNode extends SplitNode {
 
-        protected ADWINDetector  driftDetector;
+        protected ADWIN driftDetector;
         protected Var  errorTracker;
         protected Node alternateTree;
+        private double maxObservedError = 1.0;
 
         protected Var branchStats = new Var();
 
         public AdaSplitNode(int numChildren, int depth, double adwinDelta) {
             super(numChildren, depth);
-            this.driftDetector = new ADWINDetector(adwinDelta);
+            this.driftDetector = new ADWIN(adwinDelta);
             this.errorTracker = new Var();
         }
 
@@ -860,13 +871,6 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         }
 
         @Override
-        public void collectAllActiveLeaves(List<LeafNode> result) {
-            super.collectAllActiveLeaves(result);
-            if (alternateTree != null) 
-                alternateTree.collectAllActiveLeaves(result);
-        }
-
-        @Override
         public void collectAllLeaves(List<LeafNode> result) {
             super.collectAllLeaves(result);
             if (alternateTree != null) 
@@ -888,9 +892,10 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
             double driftInput = Math.abs(y - yPred);
             double oldMean = errorTracker.getMean();
-            driftDetector.update(driftInput);
+            maxObservedError = Math.max(maxObservedError, driftInput);
+            driftDetector.setInput(driftInput / maxObservedError);
             errorTracker.update(driftInput, 1.0);
-            boolean errorChange = driftDetector.detectedChange();
+            boolean errorChange = driftDetector.getChange();
 
             // Error is decreasing — keep things as they are, reset tracker
             if (errorChange && errorTracker.getMean() < oldMean) {
@@ -1165,8 +1170,8 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
         public AdaNumMultiwaySplitNode(int depth, int attrIdx, double radius, int[] initialSlotIds, double adwinDelta) {
             super(initialSlotIds.length, depth, adwinDelta);
-            this.attrIdx      = attrIdx;
-            this.radius       = radius;
+            this.attrIdx = attrIdx;
+            this.radius = radius;
             this.slotToBranch = new HashMap<>();
             this.branchToSlot = new HashMap<>();
             for (int i = 0; i < initialSlotIds.length; i++) {
@@ -1184,7 +1189,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         }
 
         public int addSlot(double featureVal) {
-            int slot   = (int) Math.floor(featureVal / radius);
+            int slot = (int) Math.floor(featureVal / radius);
             int branch = slotToBranch.size();
             slotToBranch.put(slot, branch);
             branchToSlot.put(branch, slot);
@@ -1355,8 +1360,8 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
     public static final class SplitCandidate {
         public double merit = Double.NEGATIVE_INFINITY;
         public double splitVal = Double.NaN;
-        public Var[]  postSplitDists = null;
-        public int    splitCatIdx = -1;
+        public Var[] postSplitDists = null;
+        public int splitCatIdx = -1;
         public boolean multiwaySplit = false;
     }
 
@@ -1781,203 +1786,4 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
     //endregion === LINEAR MODEL  (SGD, aligned to River's LinearRegression defaults) ===
 
-    //region === ADWIN DETECTOR (port of River's adwin_c.pyx AdaptiveWindowing) ===
-
-    public interface DriftDetector {
-        void update(double value);
-        boolean detectedChange();
-        void reset();
-    }
-
-    public static class ADWINDetector implements DriftDetector {
-        private final double delta;
-        private final int clock;
-        private final int maxBuckets;
-        private final int minWindowLength;
-        private final int gracePeriod;
-
-        private double total = 0.0;
-        private double variance = 0.0;
-        private double width = 0.0;
-        private int tick = 0;
-        private boolean changed = false;
-
-        // index 0 = newest level (level 0), last index = oldest level
-        private final ArrayList<BucketRow> buckets = new ArrayList<>();
-
-        public ADWINDetector(double delta) {
-            this(delta, 32, 5, 5, 10);
-        }
-
-        public ADWINDetector(double delta, int clock, int maxBuckets, int minWindowLength, int gracePeriod) {
-            this.delta = delta;
-            this.clock = clock;
-            this.maxBuckets = maxBuckets;
-            this.minWindowLength = minWindowLength;
-            this.gracePeriod = gracePeriod;
-            buckets.add(new BucketRow(maxBuckets));
-        }
-
-        @Override
-        public void update(double value) {
-            insertElement(value, 0.0);
-            changed = detectChange();
-        }
-
-        @Override public boolean detectedChange() { return changed; }
-
-        @Override
-        public void reset() {
-            total = 0.0; variance = 0.0; width = 0.0;
-            tick = 0; changed = false;
-            buckets.clear();
-            buckets.add(new BucketRow(maxBuckets));
-        }
-
-        private void insertElement(double value, double variance) {
-            buckets.get(0).insertData(value, variance);
-            if (width > 1.0) {
-                double prevTotal = this.total;
-                double prevWidth = this.width;
-                this.variance += (prevWidth - 1.0) * (value - prevTotal / (prevWidth - 1.0))
-                    * (value - prevTotal / (prevWidth - 1.0)) / prevWidth;
-            }
-            width += 1.0;
-            total += value;
-            compressBuckets();
-        }
-
-        private double deleteElement() {
-            int lastIdx = buckets.size() - 1;
-            BucketRow bucket = buckets.get(lastIdx);
-            double n = Math.pow(2, lastIdx);
-            double u = bucket.getTotal(0);
-            double mu = u / n;
-            double v = bucket.getVariance(0);
-
-            width -= n;
-            total -= u;
-            double muWindow = width > 0 ? total / width : 0.0;
-            variance -= v + n * width * (mu - muWindow) * (mu - muWindow) / (n + width);
-
-            bucket.remove();
-            if (bucket.currentIdx == 0) buckets.remove(lastIdx);
-            return n;
-        }
-
-        private void compressBuckets() {
-            for (int idx = 0; idx < buckets.size(); idx++) {
-                BucketRow bucket = buckets.get(idx);
-                if (bucket.currentIdx != maxBuckets + 1) break;
-                if (idx + 1 >= buckets.size()) buckets.add(new BucketRow(maxBuckets));
-                BucketRow next = buckets.get(idx + 1);
-                double n1 = Math.pow(2, idx);
-                double n2 = n1;
-                double mu1 = bucket.getTotal(0) / n1;
-                double mu2 = bucket.getTotal(1) / n2;
-                double total12 = bucket.getTotal(0) + bucket.getTotal(1);
-                double v12 = bucket.getVariance(0) + bucket.getVariance(1)
-                    + n1 * n2 * (mu1 - mu2) * (mu1 - mu2) / (n1 + n2);
-                next.insertData(total12, v12);
-                bucket.compress(2);
-                if (next.currentIdx <= maxBuckets) break;
-            }
-        }
-
-        private boolean detectChange() {
-            boolean changeDetected = false;
-            tick++;
-            if (tick % clock != 0 || width <= gracePeriod) return false;
-
-            boolean reduceWidth = true;
-            while (reduceWidth) {
-                reduceWidth = false;
-                double n0 = 0.0, n1 = width;
-                double u0 = 0.0, u1 = total;
-                boolean exitFlag = false;
-
-                for (int i = buckets.size() - 1; i >= 0 && !exitFlag; i--) {
-                    BucketRow bucket = buckets.get(i);
-                    for (int k = 0; k < bucket.currentIdx; k++) {
-                        double n2 = Math.pow(2, i);
-                        double u2 = bucket.getTotal(k);
-
-                        n0 += n2; 
-                        n1 -= n2;
-                        u0 += u2; 
-                        u1 -= u2;
-
-                        if (i == 0 && k == bucket.currentIdx - 1) {
-                            exitFlag = true;
-                            break;
-                        }
-
-                        if (n1 >= minWindowLength && n0 >= minWindowLength) {
-                            double deltaMean = (u0 / n0) - (u1 / n1);
-                            if (evaluateCut(n0, n1, deltaMean)) {
-                                reduceWidth = true;
-                                changeDetected = true;
-                                if (width > 0) {
-                                    n0 -= deleteElement();
-                                    exitFlag = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            return changeDetected;
-        }
-
-        private boolean evaluateCut(double n0, double n1, double deltaMean) {
-            if (width <= 0) 
-                return false;
-            double varianceInWindow = variance / width;
-            double deltaPrime = Math.log(2.0 * Math.log(width) / delta);
-            if (deltaPrime <= 0) 
-                return false;
-            double mRecip = 1.0 / (n0 - minWindowLength + 1) + 1.0 / (n1 - minWindowLength + 1);
-            double epsilon = Math.sqrt(2.0 * mRecip * varianceInWindow * deltaPrime)
-                + 2.0 / 3.0 * deltaPrime * mRecip;
-            return Math.abs(deltaMean) > epsilon;
-        }
-
-        private static class BucketRow {
-            private final double[] totals;
-            private final double[] variances;
-            int currentIdx = 0;
-
-            BucketRow(int maxSize) {
-                totals = new double[maxSize + 1];
-                variances = new double[maxSize + 1];
-            }
-
-            void insertData(double value, double variance) {
-                totals[currentIdx] = value;
-                variances[currentIdx] = variance;
-                currentIdx++;
-            }
-
-            double getTotal(int idx) { return totals[idx]; }
-            double getVariance(int idx) { return variances[idx]; }
-
-            void remove() { compress(1); }
-
-            void compress(int n) {
-                for (int i = n; i < totals.length; i++) {
-                    totals[i - n] = totals[i];
-                    variances[i - n] = variances[i];
-                }
-                for (int i = totals.length - n; i < totals.length; i++) {
-                    totals[i] = 0.0;
-                    variances[i] = 0.0;
-                }
-                currentIdx -= n;
-            }
-        }
-    }
-
-    //endregion === ADWIN DETECTOR ===
- 
 }
