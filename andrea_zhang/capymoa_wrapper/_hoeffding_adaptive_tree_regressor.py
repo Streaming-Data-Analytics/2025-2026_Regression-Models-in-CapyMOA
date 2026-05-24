@@ -35,6 +35,8 @@ class HoeffdingAdaptiveTreeRegressor(MOARegressor):
         max_size: float = 500.0,
         memory_estimate_period: int = 1_000_000,
         tebst_digits: int = 1,
+        numerical_multiway: bool = False,
+        numerical_multiway_radius: float = 0.25,
         max_depth: Optional[int] = None,
         no_bootstrap_sampling: bool = False,
         binary_split: bool = False,
@@ -61,7 +63,10 @@ class HoeffdingAdaptiveTreeRegressor(MOARegressor):
         :param adwin_delta: ADWIN delta for all drift detectors.
         :param max_size: Maximum tree size in MiB.
         :param memory_estimate_period: Instances between memory size checks.
-        :param tebst_digits: Decimal digits for TEBST rounding.
+        :param tebst_digits: Decimal digits for TEBST rounding (default numerical splitter).
+        :param numerical_multiway: Enable multiway splits on numerical features via RadiusSplitter.
+            Replaces TEBSTSplitter; scale features first (River QOSplitter default: radius=0.25).
+        :param numerical_multiway_radius: Bin width for RadiusSplitter: slot = floor(x / radius).
         :param max_depth: Maximum tree depth (None = unlimited).
         :param no_bootstrap_sampling: Disable Poisson bootstrap sampling.
         :param binary_split: Force binary splits for nominal features.
@@ -95,6 +100,9 @@ class HoeffdingAdaptiveTreeRegressor(MOARegressor):
         cli.append(f"-M {max_size}")
         cli.append(f"-e {memory_estimate_period}")
         cli.append(f"-k {tebst_digits}")
+        if numerical_multiway:
+            cli.append("-N")
+        cli.append(f"-R {numerical_multiway_radius}")
         cli.append(f"-x {max_depth if max_depth is not None else 0}")
         if no_bootstrap_sampling:
             cli.append("-b")

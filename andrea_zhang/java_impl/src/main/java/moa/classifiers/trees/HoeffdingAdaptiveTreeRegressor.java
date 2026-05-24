@@ -22,6 +22,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 
 public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implements Regressor {
 
@@ -137,6 +138,18 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
             "Number of decimal digits for TEBST rounding (River default: 1).",
             1, 0, 10);
 
+    public FlagOption numericalMultiwayOption = new FlagOption(
+        "numericalMultiway", 'N',
+        "Enable multiway splits on numerical features using radius-based binning "
+        + "(slot = floor(x / radius)). Uses RadiusSplitter instead of TEBSTSplitter. "
+        + "Scale features before use; mirrors River QOSplitter(allow_multiway_splits=True).");
+
+    public FloatOption numericalMultiwayRadiusOption = new FloatOption(
+        "numericalMultiwayRadius", 'R',
+        "Bin width for numerical multiway splits. Values mapped to slot = floor(x / radius). "
+        + "River QOSplitter default: 0.25.",
+        0.25, Double.MIN_VALUE, Double.MAX_VALUE);
+
     public FloatOption adwinDeltaOption = new FloatOption(
             "adwinDelta", 'a',
             "Delta parameter for all ADWIN drift detectors.",
@@ -153,6 +166,10 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
     private double sizeEstimateOverhead = 1.0;
     private double activeLeafSizeEstimate = 0.0;
     private double inactiveLeafSizeEstimate = 0.0;
+
+    // Global feature statistics for LinearModel normalization (mirrors FIMTDD.sumOfAttrValues/Squares).
+    protected double[] sumOfAttrValues;
+    protected double[] sumOfAttrSqValues;
 
     protected int nAlternateTrees = 0;
     protected int nSwitchAlternateTrees = 0;
@@ -173,6 +190,8 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
     protected boolean binarySplit;
     protected boolean bootstrapSampling;
     protected int tebstDigits;
+    protected boolean numericalMultiway;
+    protected double numericalMultiwayRadius;
     protected int maxDepth;
     protected boolean removePoorAttrs;
     protected boolean stopMemManagement;
@@ -215,6 +234,8 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         binarySplit = binarySplitOption.isSet();
         bootstrapSampling = !noBootstrapSamplingOption.isSet();
         tebstDigits = tebstDigitsOption.getValue();
+        numericalMultiway = numericalMultiwayOption.isSet();
+        numericalMultiwayRadius = numericalMultiwayRadiusOption.getValue();
         maxDepth = maxDepthOption.getValue() == 0 ? Integer.MAX_VALUE : maxDepthOption.getValue();
         removePoorAttrs = removePoorAttrsOption.isSet();
         stopMemManagement = stopMemManagementOption.isSet();
@@ -252,6 +273,8 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         nAlternateTrees = 0;
         nSwitchAlternateTrees = 0;
         nPrunedAlternateTrees = 0;
+        sumOfAttrValues = null;
+        sumOfAttrSqValues = null;
     }
 
     @Override
@@ -275,9 +298,35 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
     // TRAINING AND PREDICTION
 
+    // Mirrors FIMTDD: normalize a single attribute value using global tree statistics.
+    double normalizeAttr(int attrIdx, double x) {
+        if (sumOfAttrValues == null || trainWeightSeen < 2) return 0.0;
+        double mean = sumOfAttrValues[attrIdx] / trainWeightSeen;
+        double variance = sumOfAttrSqValues[attrIdx] / trainWeightSeen - mean * mean;
+        if (variance <= 0) return 0.0;
+        double sd = Math.sqrt(variance);
+        return sd < 1e-10 ? 0.0 : (x - mean) / (3.0 * sd);
+    }
+
     @Override
     public void trainOnInstanceImpl(Instance inst) {
         trainWeightSeen += inst.weight();
+
+        // Update global feature statistics before learning (mirrors FIMTDD).
+        int nAttrs = inst.numAttributes() - 1;
+        if (sumOfAttrValues == null) {
+            sumOfAttrValues   = new double[nAttrs];
+            sumOfAttrSqValues = new double[nAttrs];
+        }
+        double w = inst.weight();
+        for (int i = 0; i < nAttrs; i++) {
+            if (!inst.attribute(i).isNominal() && !inst.isMissing(i)) {
+                double v = inst.value(i);
+                sumOfAttrValues[i]   += v * w;
+                sumOfAttrSqValues[i] += v * v * w;
+            }
+        }
+
         if (root == null) {
             root = newLeaf(0);
             nActiveLeaves = 1;
@@ -343,7 +392,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
             enforceTreeSizeLimit();
     }
 
-    void enforceTreeSizeLimit() {
+    private void enforceTreeSizeLimit() {
         double maxBytes = maxSizeMiB * 1024.0 * 1024.0;
 
         // Mirrors River: enter only when inactive leaves exist or size is exceeded
@@ -500,19 +549,6 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
     //region === LEAF NODE ===
 
-    // LEAF NODE  (abstract base — mirrors River's AdaLeafRegressor)
-    //
-    // Contains the single shared learn() that all leaf types inherit, identical
-    // to River's AdaLeafRegressor.learn_one: bootstrap sampling, drift detection
-    // via ADWIN, error tracking, then delegates to afterUpdate() for the
-    // subclass-specific part (leafModel update and/or FMSE), and finally
-    // calls attemptSplit().
-    //
-    // Each concrete subclass only overrides:
-    //   - prediction()   → what to return as a prediction (mean / model / adaptive)
-    //   - afterUpdate()  → what extra work to do after stats are updated
-    //                      (no-op for MEAN, model update for MODEL/ADAPTIVE)
-
     public abstract static class LeafNode extends Node {
 
         protected Var stats = new Var();
@@ -523,7 +559,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         protected Var errorTracker;
         private double maxObservedError = 1.0;
 
-        /** Per-attribute splitters (numeric: TEBSTSplitter, nominal: NominalSplitter); null → inactive. */
+        /** Per-attribute splitters (numeric: TEBSTSplitter or RadiusSplitter, nominal: NominalSplitter); null → inactive. */
         protected Map<Integer, Splitter> splitters = null;
         protected Set<Integer> disabledAttrs = new HashSet<>();
 
@@ -541,11 +577,12 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
             this.splitters = new HashMap<>();
         }
 
-        @Override public Var getErrorTracker() { return errorTracker; }
+        public Var getErrorTracker() { return errorTracker; }
 
         public boolean isActive() { return splitters != null; }
         public void activate() {
-            if (splitters == null) splitters = new HashMap<>();
+            if (splitters == null) 
+                splitters = new HashMap<>();
         }
         public void deactivate() { splitters = null; }
 
@@ -567,9 +604,8 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
                 for (int i = 0; i < numAttrs; i++) {
                     if (disabledAttrs.contains(i) || inst.isMissing(i))
                         continue;
-                    boolean isNom = inst.attribute(i).isNominal()
-                        || (tree.nominalAttributeIndices != null && tree.nominalAttributeIndices.contains(i));
-                    splitters.computeIfAbsent(i, k -> isNom ? new NominalSplitter() : new TEBSTSplitter(tebstDigits)).update(inst.value(i), y, w);
+                    boolean isNom = inst.attribute(i).isNominal() || (tree.nominalAttributeIndices != null && tree.nominalAttributeIndices.contains(i));
+                    splitters.computeIfAbsent(i, k -> isNom ? new NominalSplitter() : (tree.numericalMultiway ? new RadiusSplitter(tree.numericalMultiwayRadius) : new TEBSTSplitter(tebstDigits))).update(inst.value(i), y, w);
                 }
             }
         }
@@ -672,11 +708,6 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
     //region === ADA LEAF MEAN ===
 
-    // ADA LEAF — MEAN  (mirrors River's AdaLeafRegMean = AdaLeafRegressor + LeafMean)
-    //
-    // Inherits learn() from LeafNode unchanged.
-    // afterUpdate() not overridden -> no-op (no leafModel to update).
-
     public static class AdaLeafMean extends LeafNode {
 
         public AdaLeafMean(int depth, double adwinDelta, int tebstDigits) {
@@ -694,12 +725,6 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
     //region === ADA LEAF MODEL ===
 
-    // ADA LEAF — MODEL  (mirrors River's AdaLeafRegModel = AdaLeafRegressor + LeafModel)
-    //
-    // Extends AdaLeafMean (mirrors River: LeafModel extends LeafMean).
-    // Inherits learn() from LeafNode unchanged.
-    // afterUpdate() initialises and updates the LinearModel after stats are updated.
-
     public static class AdaLeafModel extends AdaLeafMean {
 
         protected LinearModel leafModel;
@@ -712,27 +737,19 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         // River: LeafModel.prediction → leaf_model.predict_one(x).
         @Override
         public double predict(Instance inst, HoeffdingAdaptiveTreeRegressor tree) {
-            return leafModel.predict(inst);
+            return leafModel.predict(inst, tree);
         }
 
         // River: LeafModel.learn_one → leaf_model.learn_one(x, y, w).
         @Override
         protected void afterUpdate(Instance inst, double w, double y, double preMean, HoeffdingAdaptiveTreeRegressor tree) {
-            leafModel.update(inst, w);
+            leafModel.update(inst, w, tree);
         }
     }
 
     //endregion === ADA LEAF MEAN 
 
     //region === ADA LEAF ADAPTIVE ===
-
-    // ADA LEAF — ADAPTIVE  (mirrors River's AdaLeafRegAdaptive = AdaLeafRegressor + LeafAdaptive)
-    //
-    // Extends AdaLeafModel (mirrors River: LeafAdaptive extends LeafModel).
-    // Inherits learn() from LeafNode and leafModel field from AdaLeafModel.
-    // beforeUpdate() mirrors River's LeafAdaptive.learn_one: captures pre-update predictions
-    // and updates FMSE BEFORE stats/model are updated.
-    // afterUpdate() delegates to super (LeafModel model update).
 
     public static class AdaLeafAdaptive extends AdaLeafModel {
 
@@ -754,7 +771,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         // River: LeafAdaptive.learn_one — FMSE update with pre-update predictions (before stats/model).
         @Override
         protected void beforeUpdate(Instance inst, double w, double y, double preMean, HoeffdingAdaptiveTreeRegressor tree) {
-            double preModel = leafModel.predict(inst);
+            double preModel = leafModel.predict(inst, tree);
             double d = tree.modelSelectorDecay;
             fmseMean = d * fmseMean + (y - preMean) * (y - preMean);
             fmseModel = d * fmseModel + (y - preModel) * (y - preModel);
@@ -848,16 +865,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
             this.errorTracker = new Var();
         }
 
-        @Override public Var getErrorTracker() { return errorTracker; }
-
-        public void collectAllBranchNodes(List<AdaSplitNode> result) {
-            result.add(this);
-            for (Node child : children)
-                if (child instanceof AdaSplitNode)
-                    ((AdaSplitNode) child).collectAllBranchNodes(result);
-            if (alternateTree instanceof AdaSplitNode)
-                ((AdaSplitNode) alternateTree).collectAllBranchNodes(result);
-        }
+        public Var getErrorTracker() { return errorTracker; }
 
         public double getBranchMean() { return branchStats.getMean(); }
 
@@ -1095,7 +1103,6 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
             this.threshold = threshold;
         }
 
-        @Override
         public int getBranchIndex(Instance inst) {
             if (inst.isMissing(attrIdx)) 
                 return -1;
@@ -1115,7 +1122,6 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
             this.rightCats = rightCats;
         }
 
-        @Override
         public int getBranchIndex(Instance inst) {
             if (inst.isMissing(attrIdx)) 
                 return -1;
@@ -1144,7 +1150,6 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
             }
         }
 
-        @Override
         public int getBranchIndex(Instance inst) {
             if (inst.isMissing(attrIdx)) return -1;
             Integer branch = categoryToBranch.get((int) inst.value(attrIdx));
@@ -1429,14 +1434,6 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
                 root.insertValue(attVal, y, w);
         }
 
-        public void update(double attVal, Map<Integer, Double> target, double w) {
-            attVal = round(attVal);
-            if (root == null)
-                root = new EBSTNode(attVal, target, w);
-            else
-                root.insertValue(attVal, target, w);
-        }
-
         @Override
         public SplitSuggestion bestEvaluatedSplitSuggestion(Var preSplit, int attrIdx, boolean binaryOnly, int minSamples) {
             SplitCandidate res = bestSplit(preSplit, minSamples);
@@ -1451,7 +1448,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         }
 
         public SplitCandidate bestSplit(Var preSplit, int minSamplesSplit) {
-            if (root == null || preSplit.getN() < 2 * minSamplesSplit) 
+            if (root == null || preSplit.getN() < 2 * minSamplesSplit)
                 return null;
             SplitCandidate best = new SplitCandidate();
             findBestSplit(root, best, new Var(), preSplit, minSamplesSplit);
@@ -1488,15 +1485,14 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
         @Override
         public void removeBadSplits(double lastCheckRatio, double lastCheckVR, double epsilon, int minSamplesSplit, Var preSplit) {
-            if (root == null || lastCheckVR <= 0) 
+            if (root == null || lastCheckVR <= 0)
                 return;
             root = removeBadSplitNodes(root, new Var(), preSplit, lastCheckRatio, lastCheckVR, epsilon, minSamplesSplit);
         }
 
         // Post-order pruning mirroring River's EBSTSplitter._remove_bad_split_nodes.
-        // Returns null if the node (and its subtree) was pruned, otherwise the node.
         private EBSTNode removeBadSplitNodes(EBSTNode node, Var aux, Var preSplit, double lastCheckRatio, double lastCheckVR, double lastCheckE, int minSamplesSplit) {
-            if (node == null) 
+            if (node == null)
                 return null;
 
             boolean isBad;
@@ -1521,7 +1517,6 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
             if (isBad) {
                 Var leftDist = node.estimator.plus(aux);
                 Var rightDist = preSplit.minus(leftDist);
-                // Mirrors River's merit_of_split: returns 0 when any branch has < min_samples_split
                 double merit = 0.0;
                 if (leftDist.getN() >= minSamplesSplit && rightDist.getN() >= minSamplesSplit)
                     merit = varianceReduction(preSplit, leftDist, rightDist);
@@ -1534,14 +1529,106 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
         private static double varianceReduction(Var parent, Var left, Var right) {
             double n = parent.getN();
-            if (n == 0) 
-                return 0;
+            if (n == 0) return 0;
             return parent.get() - (left.getN() / n * left.get() + right.getN() / n * right.get());
         }
-
     }
 
     //endregion === TEBST SPLITTER ===
+
+    //region === RADIUS SPLITTER ===
+
+    // Mirrors River's QOSplitter(allow_multiway_splits=True). Used when numericalMultiway=true.
+    // Bins numerical values into slots via slot = floor(x / radius).
+    // Evaluates both a multiway candidate (one branch per slot, when > 2 slots and !binaryOnly)
+    // and the best binary candidate (midpoint between adjacent sorted slots), returns the better one.
+    public static class RadiusSplitter implements Splitter {
+
+        private final double radius;
+        private final TreeMap<Integer, Var> slotStats = new TreeMap<>();
+
+        public RadiusSplitter(double radius) {
+            this.radius = radius;
+        }
+
+        private int slot(double v) {
+            return (int) Math.floor(v / radius);
+        }
+
+        @Override
+        public void update(double attVal, double y, double w) {
+            slotStats.computeIfAbsent(slot(attVal), k -> new Var()).update(y, w);
+        }
+
+        @Override
+        public SplitSuggestion bestEvaluatedSplitSuggestion(Var preSplit, int attrIdx, boolean binaryOnly, int minSamples) {
+            if (slotStats.size() < 2) return null;
+
+            List<Integer> sortedSlots = new ArrayList<>(slotStats.keySet());
+            SplitSuggestion best = null;
+
+            // Multiway candidate: one branch per slot.
+            if (!binaryOnly && slotStats.size() > 2) {
+                Var[] dists = new Var[sortedSlots.size()];
+                boolean enough = true;
+                for (int i = 0; i < sortedSlots.size(); i++) {
+                    dists[i] = slotStats.get(sortedSlots.get(i));
+                    if (dists[i].getN() < minSamples) { enough = false; break; }
+                }
+                if (enough) {
+                    double merit = varianceReductionMulti(preSplit, dists);
+                    if (merit > 0) {
+                        SplitSuggestion s = new SplitSuggestion();
+                        s.merit = merit;
+                        s.feature = attrIdx;
+                        s.numericalFeature = true;
+                        s.multiwaySplit = true;
+                        s.radius = radius;
+                        s.slotIds = sortedSlots.stream().mapToInt(Integer::intValue).toArray();
+                        s.childrenStats = dists;
+                        best = s;
+                    }
+                }
+            }
+
+            // Binary candidate: best midpoint between adjacent sorted slots.
+            Var leftAcc = new Var();
+            for (int i = 0; i < sortedSlots.size() - 1; i++) {
+                leftAcc.addInPlace(slotStats.get(sortedSlots.get(i)));
+                Var right = preSplit.minus(leftAcc);
+                if (leftAcc.getN() < minSamples || right.getN() < minSamples) continue;
+                double merit = varianceReduction(preSplit, leftAcc, right);
+                if (best == null || merit > best.merit) {
+                    SplitSuggestion s = new SplitSuggestion();
+                    s.merit = merit;
+                    s.feature = attrIdx;
+                    s.numericalFeature = true;
+                    s.multiwaySplit = false;
+                    s.splitVal = (sortedSlots.get(i) + 1) * radius;
+                    s.childrenStats = new Var[]{ leftAcc.plus(new Var()), preSplit.minus(leftAcc) };
+                    best = s;
+                }
+            }
+
+            return best;
+        }
+
+        private static double varianceReduction(Var parent, Var left, Var right) {
+            double n = parent.getN();
+            if (n == 0) return 0;
+            return parent.get() - (left.getN() / n * left.get() + right.getN() / n * right.get());
+        }
+
+        private static double varianceReductionMulti(Var parent, Var[] children) {
+            double n = parent.getN();
+            if (n == 0) return 0;
+            double contrib = 0;
+            for (Var c : children) contrib += c.getN() / n * c.get();
+            return parent.get() - contrib;
+        }
+    }
+
+    //endregion === RADIUS SPLITTER ===
 
     //region === VAR (Welford's online weighted variance, mirrors River's stats.Var with ddof=1) ===
 
@@ -1726,8 +1813,8 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
         private final double lr, l2, l1;
 
         public LinearModel(double lr, double l2, double l1) {
-            this.lr = lr; 
-            this.l2 = l2; 
+            this.lr = lr;
+            this.l2 = l2;
             this.l1 = l1;
         }
 
@@ -1742,27 +1829,29 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
             return m;
         }
 
-        public double predict(Instance inst) {
+        // Uses global tree statistics for normalization, mirroring FIMTDD.normalizedInstance().
+        public double predict(Instance inst, HoeffdingAdaptiveTreeRegressor tree) {
             double p = bias;
             for (int j = 0; j < inst.numValues(); j++) {
                 int i = inst.index(j);
-                if (i == inst.classIndex() || inst.attribute(i).isNominal()) 
+                if (i == inst.classIndex() || inst.attribute(i).isNominal())
                     continue;
-                p += weights.getOrDefault(i, 0.0) * inst.valueSparse(j);
+                p += weights.getOrDefault(i, 0.0) * tree.normalizeAttr(i, inst.valueSparse(j));
             }
             return p;
         }
 
-        public void update(Instance inst, double w) {
-            double rawGradient = (predict(inst) - inst.classValue()) * w;
+        public void update(Instance inst, double w, HoeffdingAdaptiveTreeRegressor tree) {
+            double rawGradient = (predict(inst, tree) - inst.classValue()) * w;
             double gradient = Math.max(-CLIP_GRADIENT, Math.min(CLIP_GRADIENT, rawGradient));
 
             for (int j = 0; j < inst.numValues(); j++) {
                 int i = inst.index(j);
-                if (i == inst.classIndex() || inst.attribute(i).isNominal()) 
+                if (i == inst.classIndex() || inst.attribute(i).isNominal())
                     continue;
+                double xNorm = tree.normalizeAttr(i, inst.valueSparse(j));
                 double wi = weights.getOrDefault(i, 0.0);
-                weights.put(i, wi - lr * (gradient * inst.valueSparse(j) + l2 * wi));
+                weights.put(i, wi - lr * (gradient * xNorm + l2 * wi));
             }
             bias -= INTERCEPT_LR * gradient;
 
@@ -1773,9 +1862,9 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
                     if (i == inst.classIndex() || inst.attribute(i).isNominal()) continue;
                     double wOld = weights.getOrDefault(i, 0.0);
                     double wNew = wOld;
-                    if (wOld > 0) 
+                    if (wOld > 0)
                         wNew = Math.max(0.0, wOld - (maxCumL1 + cumL1map.getOrDefault(i, 0.0)));
-                    else if (wOld < 0) 
+                    else if (wOld < 0)
                         wNew = Math.min(0.0, wOld + (maxCumL1 - cumL1map.getOrDefault(i, 0.0)));
                     weights.put(i, wNew);
                     cumL1map.merge(i, wNew - wOld, Double::sum);
