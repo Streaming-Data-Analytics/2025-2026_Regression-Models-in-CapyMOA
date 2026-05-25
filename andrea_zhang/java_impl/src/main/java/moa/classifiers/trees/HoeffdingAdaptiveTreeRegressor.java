@@ -298,14 +298,21 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
     // TRAINING AND PREDICTION
 
-    // Mirrors FIMTDD: normalize a single attribute value using global tree statistics.
-    double normalizeAttr(int attrIdx, double x) {
-        if (sumOfAttrValues == null || trainWeightSeen < 2) return 0.0;
-        double mean = sumOfAttrValues[attrIdx] / trainWeightSeen;
-        double variance = sumOfAttrSqValues[attrIdx] / trainWeightSeen - mean * mean;
-        if (variance <= 0) return 0.0;
-        double sd = Math.sqrt(variance);
-        return sd < 1e-10 ? 0.0 : (x - mean) / (3.0 * sd);
+    // Mirrors River's StandardScaler.transform_one: z-score normalization (no factor 3).
+    // Applied upstream so all components (splits, ADWIN, leaf models) see normalized values.
+    public Instance normalizeInstance(Instance inst) {
+        if (sumOfAttrValues == null || trainWeightSeen < 2) return inst;
+        Instance copy = inst.copy();
+        int nAttrs = inst.numAttributes() - 1;
+        for (int i = 0; i < nAttrs; i++) {
+            if (inst.attribute(i).isNominal() || inst.isMissing(i)) continue;
+            double mean = sumOfAttrValues[i] / trainWeightSeen;
+            double variance = sumOfAttrSqValues[i] / trainWeightSeen - mean * mean;
+            if (variance <= 0) { copy.setValue(i, 0.0); continue; }
+            double sd = Math.sqrt(variance);
+            copy.setValue(i, sd < 1e-10 ? 0.0 : (inst.value(i) - mean) / sd);
+        }
+        return copy;
     }
 
     @Override
@@ -331,7 +338,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
             root = newLeaf(0);
             nActiveLeaves = 1;
         }
-        root.learn(inst, this, null, -1);
+        root.learn(normalizeInstance(inst), this, null, -1);
 
         if (trainWeightSeen % memoryEstimatePeriod == 0) {
             estimateModelSize();
@@ -340,15 +347,16 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
 
     @Override
     public double[] getVotesForInstance(Instance inst) {
-        if (root == null) 
+        if (root == null)
             return new double[]{0.0};
+        Instance normInst = normalizeInstance(inst);
         List<Node> leaves = new ArrayList<>();
-        root.collectLeaves(inst, leaves);
-        if (leaves.isEmpty()) 
+        root.collectLeaves(normInst, leaves);
+        if (leaves.isEmpty())
             return new double[]{0.0};
         double sum = 0;
-        for (Node leaf : leaves) 
-            sum += leaf.predict(inst, this);
+        for (Node leaf : leaves)
+            sum += leaf.predict(normInst, this);
         return new double[]{sum / leaves.size()};
     }
 
@@ -1829,14 +1837,14 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
             return m;
         }
 
-        // Uses global tree statistics for normalization, mirroring FIMTDD.normalizedInstance().
+        // Instance is already normalized upstream by normalizeInstance() — use values directly.
         public double predict(Instance inst, HoeffdingAdaptiveTreeRegressor tree) {
             double p = bias;
             for (int j = 0; j < inst.numValues(); j++) {
                 int i = inst.index(j);
                 if (i == inst.classIndex() || inst.attribute(i).isNominal())
                     continue;
-                p += weights.getOrDefault(i, 0.0) * tree.normalizeAttr(i, inst.valueSparse(j));
+                p += weights.getOrDefault(i, 0.0) * inst.valueSparse(j);
             }
             return p;
         }
@@ -1849,9 +1857,9 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier implement
                 int i = inst.index(j);
                 if (i == inst.classIndex() || inst.attribute(i).isNominal())
                     continue;
-                double xNorm = tree.normalizeAttr(i, inst.valueSparse(j));
+                double x = inst.valueSparse(j);
                 double wi = weights.getOrDefault(i, 0.0);
-                weights.put(i, wi - lr * (gradient * xNorm + l2 * wi));
+                weights.put(i, wi - lr * (gradient * x + l2 * wi));
             }
             bias -= INTERCEPT_LR * gradient;
 
