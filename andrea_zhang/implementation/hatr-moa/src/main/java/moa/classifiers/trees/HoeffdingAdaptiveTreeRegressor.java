@@ -7,6 +7,7 @@ import com.github.javacliparser.MultiChoiceOption;
 
 import com.yahoo.labs.samoa.instances.Instance;
 import moa.core.Measurement;
+import moa.core.SizeOf;
 import moa.classifiers.AbstractClassifier;
 import moa.classifiers.trees.hatr.*;
 
@@ -73,6 +74,16 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
     public FloatOption perceptronLROption = new FloatOption("perceptronLR", 'L',
         "Learning rate for the Perceptron leaf model.", 0.01, 0.0, 1.0);
 
+    public FloatOption maxSizeMBOption = new FloatOption("maxSizeMB", 'M',
+        "Maximum memory consumed by the tree (MB). Requires SizeOf agent; silently disabled otherwise.",
+        500.0, 0.0, Float.MAX_VALUE);
+
+    public IntOption memoryEstimatePeriodOption = new IntOption("memoryEstimatePeriod", 'E',
+        "Number of instances between memory consumption checks.", 1000000, 1, Integer.MAX_VALUE);
+
+    public FlagOption stopMemManagementOption = new FlagOption("stopMemManagement", 'S',
+        "Stop tree growth (rather than deactivate leaves) when memory limit is hit.");
+
     // Internal state (package-accessible for node classes) 
 
     public HANode root;
@@ -104,6 +115,16 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
     /** Prototype attribute observer — cloned for each new leaf's numeric observers. */
     public HAAttributeObserver numericObserverProto;
 
+    // Memory management state (mirrors River's _active_leaf_size_estimate etc.)
+    public long maxByteSize;
+    public int memoryEstimatePeriod;
+    public boolean stopMemManagement;
+    public boolean growthAllowed;
+    public double trainWeightSeenByModel;
+    public double activeLeafByteSizeEstimate;
+    public double inactiveLeafByteSizeEstimate;
+    public double byteSizeEstimateOverheadFraction;
+
     private Random rng;
 
     // AbstractClassifier lifecycle 
@@ -128,6 +149,15 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
         driftDetectorProto = new ADWINDetector(adwinDelta, 32, 5, 5, 10);
         numericObserverProto = new HATEBSTObserver(tebstDigitsOption.getValue());
 
+        maxByteSize = (long) (maxSizeMBOption.getValue() * 1024 * 1024);
+        memoryEstimatePeriod = memoryEstimatePeriodOption.getValue();
+        stopMemManagement = stopMemManagementOption.isSet();
+        growthAllowed = true;
+        trainWeightSeenByModel = 0;
+        activeLeafByteSizeEstimate = 0;
+        inactiveLeafByteSizeEstimate = 0;
+        byteSizeEstimateOverheadFraction = 1.0;
+
         root = null;
         nActiveLeaves = 0;
         nInactiveLeaves = 0;
@@ -149,6 +179,11 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
             ((AdaLeafNode) root).adaLearnOne(inst, this, null, -1);
         } else if (root instanceof AdaBranchNode) {
             ((AdaBranchNode) root).adaLearnOne(inst, this, null, -1);
+        }
+
+        trainWeightSeenByModel += inst.weight();
+        if (trainWeightSeenByModel % memoryEstimatePeriod == 0) {
+            estimateModelByteSizes();
         }
     }
 
@@ -329,6 +364,75 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
             root = branch;
         } else {
             parent.children.set(parentBranch, branch);
+        }
+    }
+
+    /**
+     * Periodically estimates the model's memory footprint and triggers
+     * enforceTrackerLimit() if the tree exceeds maxByteSize.
+     * Mirrors River's _estimate_model_size() and MOA's estimateModelByteSizes().
+     * Silently disabled when the SizeOf agent is absent (SizeOf returns -1).
+     */
+    public void estimateModelByteSizes() {
+        if (root == null) return;
+        List<HALeafNode> leaves = root.iterLeaves();
+        long totalActiveSize = 0, totalInactiveSize = 0;
+        for (HALeafNode leaf : leaves) {
+            if (leaf.isActive()) totalActiveSize += SizeOf.fullSizeOf(leaf);
+            else                 totalInactiveSize += SizeOf.fullSizeOf(leaf);
+        }
+        if (totalActiveSize > 0 && nActiveLeaves > 0)
+            activeLeafByteSizeEstimate = (double) totalActiveSize / nActiveLeaves;
+        if (totalInactiveSize > 0 && nInactiveLeaves > 0)
+            inactiveLeafByteSizeEstimate = (double) totalInactiveSize / nInactiveLeaves;
+        long actualModelSize = SizeOf.fullSizeOf(this);
+        double estimatedModelSize = nActiveLeaves * activeLeafByteSizeEstimate
+                + nInactiveLeaves * inactiveLeafByteSizeEstimate;
+        if (estimatedModelSize > 0)
+            byteSizeEstimateOverheadFraction = (double) actualModelSize / estimatedModelSize;
+        if (actualModelSize > maxByteSize)
+            enforceTrackerLimit();
+    }
+
+    /**
+     * Deactivates the least-promising leaves (deepest first) until the tree fits
+     * within maxByteSize, re-activating previously inactive leaves when possible.
+     * Mirrors River's _enforce_size_limit() and MOA's enforceTrackerLimit().
+     */
+    public void enforceTrackerLimit() {
+        if (nInactiveLeaves > 0 ||
+                (nActiveLeaves * activeLeafByteSizeEstimate
+                 + nInactiveLeaves * inactiveLeafByteSizeEstimate)
+                 * byteSizeEstimateOverheadFraction > maxByteSize) {
+            if (stopMemManagement) {
+                growthAllowed = false;
+                return;
+            }
+        }
+        List<HALeafNode> leaves = root.iterLeaves();
+        leaves.sort(Comparator.comparingInt(HALeafNode::calculatePromise));
+        int maxActive = 0;
+        while (maxActive < leaves.size()) {
+            maxActive++;
+            if ((maxActive * activeLeafByteSizeEstimate
+                 + (leaves.size() - maxActive) * inactiveLeafByteSizeEstimate)
+                 * byteSizeEstimateOverheadFraction > maxByteSize) {
+                maxActive--;
+                break;
+            }
+        }
+        int cutoff = leaves.size() - maxActive;
+        for (int i = 0; i < cutoff; i++) {
+            if (leaves.get(i).isActive()) {
+                leaves.get(i).deactivate();
+                nActiveLeaves--; nInactiveLeaves++;
+            }
+        }
+        for (int i = cutoff; i < leaves.size(); i++) {
+            if (!leaves.get(i).isActive()) {
+                leaves.get(i).activate();
+                nActiveLeaves++; nInactiveLeaves--;
+            }
         }
     }
 

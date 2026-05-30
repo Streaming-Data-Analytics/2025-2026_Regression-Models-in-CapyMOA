@@ -60,6 +60,9 @@ class HoeffdingAdaptiveTreeRegressor(MOARegressor):
         merit_preprune: bool = True,
         adwin_delta: float = 0.002,
         learning_ratio: float = 0.01,
+        max_size_mb: float = 500.0,
+        memory_estimate_period: int = 1_000_000,
+        stop_mem_management: bool = False,
         random_seed: Optional[int] = None,
     ) -> None:
         """Construct a Hoeffding Adaptive Tree Regressor.
@@ -86,6 +89,13 @@ class HoeffdingAdaptiveTreeRegressor(MOARegressor):
         :param merit_preprune: If True, enable merit-based pre-pruning (null-split option).
         :param adwin_delta: Delta parameter of the per-node ADWIN drift detectors.
         :param learning_ratio: Learning rate of the linear (perceptron) leaf model.
+        :param max_size_mb: Maximum memory consumed by the tree in MB. Requires the
+            SizeOf agent (``-javaagent:sizeofag.jar`` and ``--add-opens`` flags); silently
+            disabled otherwise.
+        :param memory_estimate_period: Number of instances between memory consumption
+            checks. Only relevant when ``max_size_mb`` is active.
+        :param stop_mem_management: If True, stop growing the tree (rather than
+            deactivating leaves) when the memory limit is hit.
         :param random_seed: Random seed for reproducibility (used by bootstrap sampling).
         """
         leaf = leaf_prediction.lower()
@@ -110,6 +120,9 @@ class HoeffdingAdaptiveTreeRegressor(MOARegressor):
         cli.append("-p") if merit_preprune else None
         cli.append(f"-A {adwin_delta}")
         cli.append(f"-L {learning_ratio}")
+        cli.append(f"-M {max_size_mb}")
+        cli.append(f"-E {memory_estimate_period}")
+        cli.append("-S") if stop_mem_management else None
 
         self.moa_learner = _MOA_HoeffdingAdaptiveTreeRegressor()
 

@@ -70,7 +70,7 @@ public abstract class AdaLeafNode extends HALeafNode {
             if (depth >= tree.maxDepth) {
                 deactivate();
                 tree.nActiveLeaves--; tree.nInactiveLeaves++;
-            } else if (isActive()) {
+            } else if (isActive() && tree.growthAllowed) {
                 tree.attemptToSplit(this, parent, parentBranch, tree.driftDetectorProto.createNew());
                 lastSplitAttemptAt = weightSeen;
             }
