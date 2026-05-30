@@ -314,6 +314,9 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
         if (best.isNumeric) {
             branch = new AdaNumBinaryBranch(leaf.stats, best.attIndex, best.numericThreshold,
                 leaf.depth, childLeaves[0], childLeaves[1], branchDriftDet);
+        } else if (best.isMultiway()) {
+            branch = new AdaNomMultiwayBranch(leaf.stats, best.attIndex, best.nominalValues,
+                leaf.depth, branchDriftDet, childLeaves);
         } else {
             branch = new AdaNomBinaryBranch(leaf.stats, best.attIndex, best.nominalValue,
                 leaf.depth, childLeaves[0], childLeaves[1], branchDriftDet);
