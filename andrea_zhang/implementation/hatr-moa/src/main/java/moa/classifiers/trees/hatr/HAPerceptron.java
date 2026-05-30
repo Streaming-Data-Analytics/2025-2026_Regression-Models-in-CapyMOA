@@ -1,0 +1,84 @@
+package moa.classifiers.trees.hatr;
+
+import com.yahoo.labs.samoa.instances.Instance;
+
+/**
+ * Online linear regression for HATR leaf nodes — faithful to River's
+ * {@code linear_model.LinearRegression} defaults:
+ *   - SGD optimizer, learning rate 0.01 (constant)
+ *   - Squared loss, whose gradient is {@code 2*(y_pred - y_true)}
+ *   - intercept updated separately with its own (constant) learning rate
+ *   - L2 = 0, gradient clipped to ±clipGradient (1e12)
+ *   - weights and intercept initialized to 0
+ *
+ * Weights are indexed by attribute position in the Instance.
+ * New features (unseen attribute indices) start with weight 0.
+ */
+public class HAPerceptron {
+    private double[] weights;
+    private double intercept = 0.0;
+    private final double lr;          // weight learning rate (SGD)
+    private final double interceptLr; // intercept learning rate
+    private final double l2;
+    private static final double CLIP_GRADIENT = 1e12;
+
+    public HAPerceptron(int numAtts, double lr, double interceptLr, double l2) {
+        this.weights = new double[numAtts];
+        this.lr = lr;
+        this.interceptLr = interceptLr;
+        this.l2 = l2;
+    }
+
+    private HAPerceptron(double[] weights, double intercept, double lr, double interceptLr, double l2) {
+        this.weights = weights.clone();
+        this.intercept = intercept;
+        this.lr = lr;
+        this.interceptLr = interceptLr;
+        this.l2 = l2;
+    }
+
+    public double predict(Instance inst) {
+        double pred = intercept;
+        int nAtt = inst.numAttributes() - 1;
+        for (int i = 0; i < nAtt; i++) {
+            if (i < weights.length && !inst.attribute(i).isNominal() && !Double.isNaN(inst.value(i))) {
+                pred += weights[i] * inst.value(i);
+            }
+        }
+        return pred;
+    }
+
+    public void train(Instance inst, double y, double w) {
+        ensureCapacity(inst.numAttributes());
+        double pred = predict(inst);
+
+        // River: loss_gradient = Squared.gradient(y, pred) * w, then clamped.
+        // Squared.gradient(y_true, y_pred) = 2 * (y_pred - y_true).
+        double lossGrad = 2.0 * (pred - y) * w;
+        if (lossGrad > CLIP_GRADIENT) lossGrad = CLIP_GRADIENT;
+        if (lossGrad < -CLIP_GRADIENT) lossGrad = -CLIP_GRADIENT;
+
+        // Intercept update (handled separately, like River's GLM).
+        intercept -= interceptLr * lossGrad;
+
+        // Weight update via SGD: w_i -= lr * (loss_gradient * x_i + l2 * w_i).
+        int nAtt = inst.numAttributes() - 1;
+        for (int i = 0; i < nAtt; i++) {
+            if (!inst.attribute(i).isNominal() && !Double.isNaN(inst.value(i))) {
+                weights[i] -= lr * (lossGrad * inst.value(i) + l2 * weights[i]);
+            }
+        }
+    }
+
+    private void ensureCapacity(int needed) {
+        if (needed > weights.length) {
+            double[] w2 = new double[needed];
+            System.arraycopy(weights, 0, w2, 0, weights.length);
+            weights = w2;
+        }
+    }
+
+    public HAPerceptron copy() {
+        return new HAPerceptron(weights, intercept, lr, interceptLr, l2);
+    }
+}
