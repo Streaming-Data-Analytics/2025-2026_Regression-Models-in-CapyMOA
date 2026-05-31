@@ -31,9 +31,12 @@ public class HAEBSTObserver implements HAAttributeObserver {
         VarStats left = node.est.add(aux[0]);
         VarStats right = preSplit.subtract(left);
 
-        if (left.getN() >= minSamples && right.getN() >= minSamples) {
+        // River: merit=0 when any branch < min_samples_split, candidate still created.
+        {
             double n = preSplit.getN();
-            double vr = preSplit.get() - (left.getN()/n)*left.get() - (right.getN()/n)*right.get();
+            double vr = (left.getN() >= minSamples && right.getN() >= minSamples)
+                      ? preSplit.get() - (left.getN()/n)*left.get() - (right.getN()/n)*right.get()
+                      : 0.0;
             if (vr > best.merit) {
                 best = new SplitCandidate(vr, attIdx, node.key, Arrays.asList(left, right));
             }

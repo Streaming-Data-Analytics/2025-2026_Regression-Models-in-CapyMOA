@@ -71,8 +71,12 @@ public abstract class AdaBranchNode extends HABranchNode {
 
                     if (p <= tree.switchSignificance) {
                         if (altMu < curMu) {
-                            // Alternate is better → swap
-                            adjustLeafCounts(tree, alternateTree.getNLeaves() - this.getNLeaves());
+                            // Alternate is better → swap.
+                            // Mirror River: _n_active_leaves -= self.n_leaves (all leaves, incl. alternates),
+                            //               _n_active_leaves += alternate.n_leaves,
+                            //               kill_tree_children (decrements per-leaf).
+                            tree.nActiveLeaves -= this.iterLeaves().size();
+                            tree.nActiveLeaves += alternateTree.iterLeaves().size();
                             killChildren(tree);
                             if (parent != null) parent.children.set(parentBranch, alternateTree);
                             else tree.root = alternateTree;
@@ -94,18 +98,39 @@ public abstract class AdaBranchNode extends HABranchNode {
             dispatch(alternateTree, inst, tree, parent, parentBranch);
         }
 
-        // Forward to the appropriate child
-        HANode child;
-        try { child = next(inst); } catch (Exception e) { child = null; }
+        // Forward to the appropriate child.
+        // For nominal multiway branches, unseen categories get a new child leaf
+        // (mirrors River's AdaBranchRegressor.learn_one: KeyError → add_child).
+        HANode child = null;
+        int childBranch = -1;
 
-        if (child != null) {
-            int childBranch;
-            try { childBranch = branchNo(inst); } catch (Exception e) { childBranch = 0; }
-            dispatch(child, inst, tree, this, childBranch);
-        } else {
-            int pathIdx = mostCommonChildIndex();
-            dispatch(children.get(pathIdx), inst, tree, this, pathIdx);
+        if (this instanceof AdaNomMultiwayBranch) {
+            AdaNomMultiwayBranch nomBranch = (AdaNomMultiwayBranch) this;
+            double featureVal = inst.value(attIndex);
+            // Missing feature (NaN): mirrors River's "self.feature in x" check → fall through
+            // to mostCommonChildIndex() rather than creating a child for category 0.
+            if (!Double.isNaN(featureVal)) {
+                int catIdx = (int) featureVal;
+                if (!nomBranch.hasCategory(catIdx)) {
+                    HALeafNode newLeaf = tree.newLeaf(null, depth + 1);
+                    childBranch = nomBranch.addNewChild(newLeaf, catIdx);
+                    tree.nActiveLeaves++;
+                    child = newLeaf;
+                }
+            }
         }
+
+        if (child == null) {
+            try { child = next(inst); } catch (Exception e) { child = null; }
+            if (child != null) {
+                try { childBranch = branchNo(inst); } catch (Exception e) { childBranch = 0; }
+            } else {
+                childBranch = mostCommonChildIndex();
+                child = children.get(childBranch);
+            }
+        }
+
+        dispatch(child, inst, tree, this, childBranch);
     }
 
     private static void dispatch(HANode node, Instance inst, HoeffdingAdaptiveTreeRegressor tree, HABranchNode parent, int parentBranch) {
@@ -120,10 +145,6 @@ public abstract class AdaBranchNode extends HABranchNode {
         if (node instanceof AdaLeafNode) return ((AdaLeafNode) node).errorTracker;
         if (node instanceof AdaBranchNode) return ((AdaBranchNode) node).errorTracker;
         return null;
-    }
-
-    private static void adjustLeafCounts(HoeffdingAdaptiveTreeRegressor tree, int delta) {
-        tree.nActiveLeaves += delta;
     }
 
     private static void killNode(HANode node, HoeffdingAdaptiveTreeRegressor tree) {

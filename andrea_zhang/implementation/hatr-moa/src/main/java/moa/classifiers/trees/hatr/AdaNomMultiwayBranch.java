@@ -37,6 +37,23 @@ public class AdaNomMultiwayBranch extends AdaBranchNode {
         return (childIdx != null) ? childIdx : mostCommonChildIndex();
     }
 
+    /** Returns true if this category index already has a mapped child. */
+    public boolean hasCategory(int catIdx) {
+        return categoryToChild.containsKey(catIdx);
+    }
+
+    /**
+     * Adds a new child leaf for a previously unseen category value.
+     * Mirrors River's NominalMultiwayBranch.add_child().
+     * @return the index of the new child in children list.
+     */
+    public int addNewChild(HANode leaf, int catIdx) {
+        int idx = children.size();
+        categoryToChild.put(catIdx, idx);
+        children.add(leaf);
+        return idx;
+    }
+
     /** Unlimited branches — mirrors River's NominalMultiwayBranch.max_branches() = -1. */
     @Override
     public int maxBranches() { return -1; }

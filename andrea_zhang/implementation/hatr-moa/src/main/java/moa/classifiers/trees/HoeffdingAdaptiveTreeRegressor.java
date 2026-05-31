@@ -84,6 +84,9 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
     public FlagOption stopMemManagementOption = new FlagOption("stopMemManagement", 'S',
         "Stop tree growth (rather than deactivate leaves) when memory limit is hit.");
 
+    public FlagOption removePoorAttrsOption = new FlagOption("removePoorAttrs", 'R',
+        "Disable poor attributes to save memory (mirrors River's remove_poor_attrs). Default: False.");
+
     // Internal state (package-accessible for node classes) 
 
     public HANode root;
@@ -105,6 +108,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
     public int minSamplesSplit;
     public int maxDepth;
     public boolean meritPreprune;
+    public boolean removePoorAttrs;
     public double adwinDelta;
     public double perceptronLR;
     public List<Integer> nominalAttributeIndices; // null = infer from Instance
@@ -143,6 +147,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
         minSamplesSplit = minSamplesSplitOption.getValue();
         maxDepth = maxDepthOption.getValue() < 0 ? Integer.MAX_VALUE : maxDepthOption.getValue();
         meritPreprune = meritPrePruneOption.isSet();
+        removePoorAttrs = removePoorAttrsOption.isSet();
         adwinDelta = adwinDeltaOption.getValue();
         perceptronLR = perceptronLROption.getValue();
 
@@ -302,8 +307,9 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
                 || hoeffdingBound < tau
             );
 
-            // Remove poor attributes
-            if (shouldSplit) {
+            // Remove poor attributes (mirrors River's remove_poor_attrs, default False).
+            // River applies this independently of should_split (line 362 vs 376 in HTR).
+            if (removePoorAttrs) {
                 double bestRatio = secondBest.merit / best.merit;
                 for (SplitCandidate c : candidates) {
                     if (!c.isNullSplit() && c.merit / best.merit < bestRatio - 2 * hoeffdingBound) {

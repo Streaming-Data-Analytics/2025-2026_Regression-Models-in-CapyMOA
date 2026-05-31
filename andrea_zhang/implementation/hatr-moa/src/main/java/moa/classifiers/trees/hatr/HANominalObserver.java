@@ -9,10 +9,12 @@ import java.util.Map;
 /**
  * Attribute observer for nominal (categorical) features.
  *
- * Mirrors River's NominalSplitterReg: when a feature has > 2 distinct values,
- * a multiway candidate (one child per value, sorted by category index) is
- * evaluated first. Binary candidates (value == X vs rest) are also evaluated
- * and replace the multiway candidate only if they achieve strictly higher merit.
+ * Mirrors River's NominalSplitterReg + VarianceReductionSplitCriterion:
+ *   - When a feature has > 2 distinct values, a multiway candidate is evaluated first.
+ *   - Binary candidates replace it only if they achieve strictly higher merit.
+ *   - When any branch has fewer than minSamples observations, merit is 0 (not skipped):
+ *     this matches River's VarianceReductionSplitCriterion.merit_of_split(), which
+ *     returns 0 rather than discarding the candidate when min_samples_split is not met.
  * This matches River's default behaviour (binary_split=False).
  */
 public class HANominalObserver implements HAAttributeObserver {
@@ -36,28 +38,30 @@ public class HANominalObserver implements HAAttributeObserver {
 
             double vr = preSplit.get();
             double n  = preSplit.getN();
-            boolean valid = true;
-            int[] nomVals      = new int[sorted.size()];
+            int[] nomVals        = new int[sorted.size()];
             List<VarStats> stats = new ArrayList<>(sorted.size());
-
+            boolean allSufficient = true;
             for (int i = 0; i < sorted.size(); i++) {
                 VarStats s = sorted.get(i).getValue();
-                if (s.getN() < minSamples) { valid = false; break; }
+                if (s.getN() < minSamples) allSufficient = false;
                 vr -= (s.getN() / n) * s.get();
                 nomVals[i] = sorted.get(i).getKey();
                 stats.add(s.copy());
             }
-            if (valid) best = new SplitCandidate(vr, attIndex, nomVals, stats);
+            // River: merit=0 when any branch < min_samples_split, candidate still created.
+            best = new SplitCandidate(allSufficient ? vr : 0.0, attIndex, nomVals, stats);
         }
 
         // Binary candidates: value == X vs rest.
         // Replace multiway only if strictly better merit (mirrors River's NominalSplitterReg).
+        // River: merit=0 when any branch < min_samples_split (not skipped).
         for (Map.Entry<Integer, VarStats> e : distPerVal.entrySet()) {
             VarStats left  = e.getValue().copy();
             VarStats right = preSplit.subtract(left);
-            if (left.getN() < minSamples || right.getN() < minSamples) continue;
             double n  = preSplit.getN();
-            double vr = preSplit.get() - (left.getN()/n)*left.get() - (right.getN()/n)*right.get();
+            double vr = (left.getN() >= minSamples && right.getN() >= minSamples)
+                      ? preSplit.get() - (left.getN()/n)*left.get() - (right.getN()/n)*right.get()
+                      : 0.0;
             if (vr > best.merit) {
                 best = new SplitCandidate(vr, attIndex, e.getKey(), Arrays.asList(left, right));
             }
