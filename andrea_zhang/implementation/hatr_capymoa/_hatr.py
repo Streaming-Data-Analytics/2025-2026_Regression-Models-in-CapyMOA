@@ -63,6 +63,7 @@ class HoeffdingAdaptiveTreeRegressor(MOARegressor):
         max_size_mb: float = 500.0,
         memory_estimate_period: int = 1_000_000,
         stop_mem_management: bool = False,
+        remove_poor_attrs: bool = False,
         random_seed: Optional[int] = None,
     ) -> None:
         """Construct a Hoeffding Adaptive Tree Regressor.
@@ -96,6 +97,8 @@ class HoeffdingAdaptiveTreeRegressor(MOARegressor):
             checks. Only relevant when ``max_size_mb`` is active.
         :param stop_mem_management: If True, stop growing the tree (rather than
             deactivating leaves) when the memory limit is hit.
+        :param remove_poor_attrs: If True, disable attributes with consistently poor
+            merit to save memory (mirrors River's ``remove_poor_attrs``). Default: False.
         :param random_seed: Random seed for reproducibility (used by bootstrap sampling).
         """
         leaf = leaf_prediction.lower()
@@ -123,6 +126,7 @@ class HoeffdingAdaptiveTreeRegressor(MOARegressor):
         cli.append(f"-M {max_size_mb}")
         cli.append(f"-E {memory_estimate_period}")
         cli.append("-S") if stop_mem_management else None
+        cli.append("-R") if remove_poor_attrs else None
 
         self.moa_learner = _MOA_HoeffdingAdaptiveTreeRegressor()
 
