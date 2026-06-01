@@ -5,20 +5,15 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * ADWIN2 drift detector faithfully ported from River's Cython implementation
- * (river/drift/adwin_c.pyx).
- *
- * Key properties that match River exactly:
  *  - Per-bucket variance tracking (Babcock et al. 2003)
- *  - Same epsilon formula: sqrt(2 * m_recip * variance_in_window * delta') + 2/3 * m_recip * delta'
+ *  - epsilon formula: sqrt(2 * m_recip * variance_in_window * delta') + 2/3 * m_recip * delta'
  *    where delta' = log(2 * log(width) / delta)
- *  - Same scan order: oldest row → newest row, oldest slot → newest slot within row
- *  - Same compress direction: merges the two OLDEST slots in a row when overflow
+ *  - scan order: oldest row → newest row, oldest slot → newest slot within row
+ *  - compress direction: merges the two OLDEST slots in a row when overflow
  *  - delete_element removes ONE oldest bucket at a time; while-loop keeps shrinking until no drift
  *
  * This is the formulation from:
  *   Babcock et al., "Maintaining Variance and k-Medians over Data Stream Windows", PODS 2003.
- * (River's version, NOT the simpler Bifet & Gavalda 2007 formula.)
  */
 public class ADWINDetector {
     private final double delta;
@@ -63,9 +58,6 @@ public class ADWINDetector {
 
     private void insertElement(double x) {
         width++;
-        // River's exact variance update (matches adwin_c.pyx _insert_element):
-        //   incremental = (old_width) * (x - old_mean)^2 / new_width
-        // width is already incremented; total is not yet updated → old_mean = total/(width-1)
         if (width > 1) {
             double oldMean = total / (width - 1);
             variance += (width - 1) * (x - oldMean) * (x - oldMean) / width;
@@ -192,7 +184,7 @@ public class ADWINDetector {
         return Math.abs(deltaMean) > epsilon;
     }
 
-    // ── Utilities ─────────────────────────────────────────────────────────────
+    // Utilities 
 
     private static double bucketSize(int rowIdx) { return Math.pow(2, rowIdx); }
 
@@ -205,7 +197,7 @@ public class ADWINDetector {
         return new ADWINDetector(delta, clock, maxBuckets, minWindowLength, gracePeriod);
     }
 
-    // ── Inner bucket class (matches River's Bucket exactly) ───────────────────
+    // Inner bucket class 
 
     private static class ADWINBucket {
         final int maxSize;

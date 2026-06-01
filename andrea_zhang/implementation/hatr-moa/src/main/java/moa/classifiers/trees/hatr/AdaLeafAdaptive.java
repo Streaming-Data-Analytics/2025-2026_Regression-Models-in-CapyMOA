@@ -6,7 +6,7 @@ import java.util.Random;
 
 /**
  * Adaptive leaf choosing between mean and linear-model predictors via EWMA error
- * tracking (faded mean squared error). Equivalent to River's AdaLeafRegAdaptive.
+ * tracking (faded mean squared error).
  */
 public class AdaLeafAdaptive extends AdaLeafNode {
     public HAPerceptron model;
@@ -21,7 +21,7 @@ public class AdaLeafAdaptive extends AdaLeafNode {
     /** Faded MSE update — uses the pre-update target mean and model prediction. */
     @Override
     protected void updateModelSelector(Instance inst, double y, HoeffdingAdaptiveTreeRegressor tree) {
-        double predMean  = stats.getMean();
+        double predMean = stats.getMean();
         double predModel = model.predict(inst);
         double decay = tree.modelSelectorDecay;
         fmseMean = decay * fmseMean + (y - predMean) * (y - predMean);
@@ -38,7 +38,6 @@ public class AdaLeafAdaptive extends AdaLeafNode {
 
     @Override
     public double getPrediction(Instance inst) {
-        // River: act as regression tree iff fmse_mean < fmse_model (strict).
         return (fmseMean < fmseModel) ? stats.getMean() : model.predict(inst);
     }
 

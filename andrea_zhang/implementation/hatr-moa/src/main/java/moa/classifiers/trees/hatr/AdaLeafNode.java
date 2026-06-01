@@ -9,7 +9,6 @@ import java.util.Random;
  * Abstract adaptive leaf node for HATR.
  * Adds ADWIN drift tracking and bootstrap sampling to the base leaf learning.
  * Subclasses implement the specific prediction strategy (mean / model / adaptive).
- * Equivalent to River's AdaLeafRegressor, fully adapted to MOA's Instance API.
  *
  * Learning order matches River exactly:
  *   1. prediction BEFORE update (for drift error)
@@ -38,14 +37,13 @@ public abstract class AdaLeafNode extends HALeafNode {
 
         double yPred = getPrediction(inst);
 
-        // Bootstrap sampling: multiply weight by Poisson(1) sample (matches River:
-        // weight is left unchanged when k == 0).
+        // Bootstrap sampling: multiply weight by Poisson(1)
         if (tree.bootstrapSampling) {
             int k = poissonSample(rng);
             if (k > 0) w *= k;
         }
 
-        // Drift tracking on the raw absolute error (as in River's AdaLeafRegressor).
+        // Drift tracking on the raw absolute error.
         double err = Math.abs(y - yPred);
         double oldMeanErr = errorTracker.getMean();
         driftDetector.update(err);
@@ -90,7 +88,7 @@ public abstract class AdaLeafNode extends HALeafNode {
             if (Double.isNaN(inst.value(i))) continue;
             HAAttributeObserver obs = observers.get(i);
             if (obs == null) {
-                boolean nom = inst.attribute(i).isNominal() || (tree.nominalAttributeIndices != null && tree.nominalAttributeIndices.contains(i));
+                boolean nom = inst.attribute(i).isNominal();
                 obs = nom ? new HANominalObserver() : defaultObserver.createNew();
                 observers.put(i, obs);
             }

@@ -27,6 +27,7 @@ import java.util.*;
 public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
 
     // MOA Options 
+    // NOTE: char 'r' is reserved by MOA's AbstractClassifier for randomSeed
 
     public IntOption gracePeriodOption = new IntOption("gracePeriod", 'g',
         "Number of instances a leaf should observe between split attempts.", 200, 1, Integer.MAX_VALUE);
@@ -60,8 +61,6 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
     public IntOption maxDepthOption = new IntOption("maxDepth", 'D',
         "Maximum tree depth (-1 = unlimited).", -1, -1, Integer.MAX_VALUE);
 
-    // NOTE: char 'r' is reserved by MOA's AbstractClassifier for randomSeed; use 'z' here
-    // to avoid an option-flag collision (which would break CLI parsing / CapyMOA wrappers).
     public IntOption tebstDigitsOption = new IntOption("tebstDigits", 'z',
         "Rounding digits for Truncated E-BST (numeric attribute observer).", 1, 0, 10);
 
@@ -87,7 +86,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
     public FlagOption removePoorAttrsOption = new FlagOption("removePoorAttrs", 'R',
         "Disable poor attributes to save memory (mirrors River's remove_poor_attrs). Default: False.");
 
-    // Internal state (package-accessible for node classes) 
+    // Internal state
 
     public HANode root;
     public int nActiveLeaves;
@@ -111,15 +110,12 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
     public boolean removePoorAttrs;
     public double adwinDelta;
     public double perceptronLR;
-    public List<Integer> nominalAttributeIndices; // null = infer from Instance
 
-    /** Prototype drift detector — cloned for each new node. */
     public ADWINDetector driftDetectorProto;
 
-    /** Prototype attribute observer — cloned for each new leaf's numeric observers. */
     public HAAttributeObserver numericObserverProto;
 
-    // Memory management state (mirrors River's _active_leaf_size_estimate etc.)
+    // Memory management state
     public long maxByteSize;
     public int memoryEstimatePeriod;
     public boolean stopMemManagement;
@@ -239,7 +235,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
         out.append(pad).append(" alternateTrees=").append(nAlternateTrees).append("\n");
     }
 
-    // ── Internal factory methods (called by node classes) ────────────────────
+    // Internal factory methods (called by node classes)
 
     /**
      * Create a new adaptive leaf at the given depth.
@@ -248,10 +244,6 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
     public HALeafNode newLeaf(HALeafNode parent, int depth) {
         ADWINDetector det = driftDetectorProto.createNew();
 
-        // River: a child inherits a deep copy of the parent leaf's model; a leaf
-        // with no model parent (root, or alternate-tree leaf grown from a branch)
-        // starts from a fresh model prototype. lr and intercept_lr both default to
-        // perceptronLR (River's SGD lr and intercept_lr defaults are both 0.01).
         HAPerceptron model = null;
         if (leafPredMode > 0) {
             if (parent instanceof AdaLeafModel) {
@@ -282,7 +274,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
 
     /**
      * Attempt to split a leaf using the Hoeffding bound criterion.
-     * Creates an adaptive branch node if the split is warranted.
+     * Creates an adaptive branch node if the split is guaranteed.
      * Called by AdaLeafNode.adaLearnOne after grace period.
      */
     public void attemptToSplit(HALeafNode leaf, HABranchNode parent, int parentBranch, ADWINDetector branchDriftDet) {
@@ -307,8 +299,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
                 || hoeffdingBound < tau
             );
 
-            // Remove poor attributes (mirrors River's remove_poor_attrs, default False).
-            // River applies this independently of should_split (line 362 vs 376 in HTR).
+            // Remove poor attributes independently of should_split
             if (removePoorAttrs) {
                 double bestRatio = secondBest.merit / best.merit;
                 for (SplitCandidate c : candidates) {
@@ -343,10 +334,6 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
         for (int i = 0; i < childStats.size(); i++) {
             childLeaves[i] = newLeaf(leaf, leaf.depth + 1);
             childLeaves[i].stats = childStats.get(i).copy();
-            // River sets last_split_attempt_at = total_weight at leaf construction
-            // (HTLeaf.__init__). Here stats are assigned after construction, so we must
-            // re-sync it; otherwise children keep last_split_attempt_at = 0 and re-attempt
-            // splits far too early (causing systematic over-splitting vs River).
             childLeaves[i].lastSplitAttemptAt = childLeaves[i].getTotalWeight();
         }
 
@@ -376,7 +363,6 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
     /**
      * Periodically estimates the model's memory footprint and triggers
      * enforceTrackerLimit() if the tree exceeds maxByteSize.
-     * Mirrors River's _estimate_model_size() and MOA's estimateModelByteSizes().
      * Silently disabled when the SizeOf agent is absent (SizeOf returns -1).
      */
     public void estimateModelByteSizes() {
@@ -384,16 +370,17 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
         List<HALeafNode> leaves = root.iterLeaves();
         long totalActiveSize = 0, totalInactiveSize = 0;
         for (HALeafNode leaf : leaves) {
-            if (leaf.isActive()) totalActiveSize += SizeOf.fullSizeOf(leaf);
-            else                 totalInactiveSize += SizeOf.fullSizeOf(leaf);
+            if (leaf.isActive()) 
+                totalActiveSize += SizeOf.fullSizeOf(leaf);
+            else                 
+                totalInactiveSize += SizeOf.fullSizeOf(leaf);
         }
         if (totalActiveSize > 0 && nActiveLeaves > 0)
             activeLeafByteSizeEstimate = (double) totalActiveSize / nActiveLeaves;
         if (totalInactiveSize > 0 && nInactiveLeaves > 0)
             inactiveLeafByteSizeEstimate = (double) totalInactiveSize / nInactiveLeaves;
         long actualModelSize = SizeOf.fullSizeOf(this);
-        double estimatedModelSize = nActiveLeaves * activeLeafByteSizeEstimate
-                + nInactiveLeaves * inactiveLeafByteSizeEstimate;
+        double estimatedModelSize = nActiveLeaves * activeLeafByteSizeEstimate + nInactiveLeaves * inactiveLeafByteSizeEstimate;
         if (estimatedModelSize > 0)
             byteSizeEstimateOverheadFraction = (double) actualModelSize / estimatedModelSize;
         if (actualModelSize > maxByteSize)
@@ -403,7 +390,6 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
     /**
      * Deactivates the least-promising leaves (deepest first) until the tree fits
      * within maxByteSize, re-activating previously inactive leaves when possible.
-     * Mirrors River's _enforce_size_limit() and MOA's enforceTrackerLimit().
      */
     public void enforceTrackerLimit() {
         if (nInactiveLeaves > 0 ||
@@ -449,14 +435,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
                 ((HAEBSTObserver) obs).pruneBadSplits(leaf.stats, lastRatio, bestVr, lastE, minSamplesSplit);
             }
         }
-    }
-
-    // CapyMOA compatibility 
-
-    /** Convenience: set nominalAttributeIndices from a list. */
-    public void setNominalAttributeIndices(List<Integer> indices) {
-        this.nominalAttributeIndices = indices;
-    }
+    } 
 
     @Override
     public String getPurposeString() {

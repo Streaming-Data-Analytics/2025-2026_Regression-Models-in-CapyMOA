@@ -6,7 +6,6 @@ import java.util.Arrays;
  * Extended Binary Search Tree (E-BST) attribute observer for numeric features.
  * Each BST node's estimator accumulates stats for all elements with value <= node.key.
  * In-order traversal + accumulator finds the best split threshold.
- * Equivalent to River's EBSTSplitter, adapted to int attIndex.
  */
 public class HAEBSTObserver implements HAAttributeObserver {
     private EBSTNode root;
@@ -31,7 +30,6 @@ public class HAEBSTObserver implements HAAttributeObserver {
         VarStats left = node.est.add(aux[0]);
         VarStats right = preSplit.subtract(left);
 
-        // River: merit=0 when any branch < min_samples_split, candidate still created.
         {
             double n = preSplit.getN();
             double vr = (left.getN() >= minSamples && right.getN() >= minSamples)
@@ -51,7 +49,6 @@ public class HAEBSTObserver implements HAAttributeObserver {
         return best;
     }
 
-    /** Remove split candidates below quality threshold (FIMT-DD pruning). */
     public void pruneBadSplits(VarStats preSplit, double lastRatio, double lastVr, double lastE, int minSamples) {
         if (root == null || lastVr <= 0) return;
         VarStats[] aux = {new VarStats()};

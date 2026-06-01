@@ -5,7 +5,6 @@ import java.util.List;
 /**
  * A split candidate produced by an attribute observer.
  * Stores merit, the split attribute (by index), threshold/value, and post-split statistics.
- * Equivalent to River's BranchFactory; adapted to use int attIndex for MOA's Instance API.
  */
 public class SplitCandidate implements Comparable<SplitCandidate> {
     public final double merit;

@@ -2,14 +2,13 @@ package moa.classifiers.trees.hatr;
 
 /**
  * Incremental sample variance using Welford's algorithm.
- *
  */
 public class VarStats {
     double n = 0.0;      // sum of weights
-    double mean = 0.0;   // running mean (river.stats.Mean)
-    double S = 0.0;      // sum of squared deviations (river.stats.Var._S)
+    double mean = 0.0;   // running mean 
+    double S = 0.0;      // sum of squared deviations 
 
-    /** Welford update — matches Mean.update + Var.update. */
+    /** Welford update */
     public void update(double x, double w) {
         // Mean.update: n += w; mean += (w/n)*(x - mean)
         double meanOld = mean;
@@ -19,7 +18,7 @@ public class VarStats {
         S += w * (x - meanOld) * (x - mean);
     }
 
-    /** Sample variance S/(n-1). No clamping, matching River's Var.get(). */
+    /** Sample variance S/(n-1). */
     public double get() {
         if (n > 1.0) return S / (n - 1.0);
         return 0.0;
@@ -28,14 +27,14 @@ public class VarStats {
     public double getMean() { return n > 0.0 ? mean : 0.0; }
     public double getN() { return n; }
 
-    /** this + o  (river Var.__add__). */
+    /** this + o */
     public VarStats add(VarStats o) {
         VarStats r = new VarStats();
         combineAdd(r, this.n, this.mean, this.S, o.n, o.mean, o.S);
         return r;
     }
 
-    /** this - o  (river Var.__sub__). */
+    /** this - o */
     public VarStats subtract(VarStats o) {
         VarStats r = new VarStats();
         combineSub(r, this.n, this.mean, this.S, o.n, o.mean, o.S);
@@ -50,11 +49,8 @@ public class VarStats {
         combineSub(this, this.n, this.mean, this.S, o.n, o.mean, o.S);
     }
 
-    // River's exact parallel combination formulas 
-
-    // Var.__iadd__:
     //   S = S_a + S_b + (mean_a - mean_b)^2 * n_a * n_b / (n_a + n_b)
-    //   Mean.__iadd__: n = n_a + n_b; mean = (n_a*mean_a + n_b*mean_b) / n
+    //   n = n_a + n_b; mean = (n_a*mean_a + n_b*mean_b) / n
     private static void combineAdd(VarStats out, double na, double ma, double sa, double nb, double mb, double sb) {
         double newN = na + nb;
         double newS = sa + sb;
@@ -65,7 +61,7 @@ public class VarStats {
         out.n = newN; out.mean = newMean; out.S = newS;
     }
 
-    // Var.__isub__ (Mean is updated first, then S uses the NEW mean and NEW n):
+    //(Mean is updated first, then S uses the NEW mean and NEW n):
     //   n = n_a - n_b; mean = (n_a*mean_a - n_b*mean_b) / n
     //   S = S_a - S_b - (mean_new - mean_b)^2 * n * n_b / (n + n_b)
     private static void combineSub(VarStats out, double na, double ma, double sa, double nb, double mb, double sb) {

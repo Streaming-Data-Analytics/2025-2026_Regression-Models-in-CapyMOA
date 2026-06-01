@@ -31,7 +31,7 @@ class HoeffdingAdaptiveTreeRegressor(MOARegressor):
     streams." International Symposium on Intelligent Data Analysis, 2009.
     <https://doi.org/10.1007/978-3-642-03915-7_22>`_
 
-    Example usage (requires the HATR class on the MOA classpath)::
+    Example usage (requires the HATR class on the MOA classpath):
 
         from capymoa.datasets import Fried
         from capymoa.regressor import HoeffdingAdaptiveTreeRegressor
@@ -98,7 +98,7 @@ class HoeffdingAdaptiveTreeRegressor(MOARegressor):
         :param stop_mem_management: If True, stop growing the tree (rather than
             deactivating leaves) when the memory limit is hit.
         :param remove_poor_attrs: If True, disable attributes with consistently poor
-            merit to save memory (mirrors River's ``remove_poor_attrs``). Default: False.
+            merit to save memory. Default: False.
         :param random_seed: Random seed for reproducibility (used by bootstrap sampling).
         """
         leaf = leaf_prediction.lower()

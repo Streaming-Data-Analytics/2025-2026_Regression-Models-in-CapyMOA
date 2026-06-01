@@ -7,7 +7,6 @@ import java.util.*;
 /**
  * Base abstract leaf node for HATR.
  * Manages attribute observers (one per observed attribute, keyed by index).
- * Adapted from HTLeaf to use MOA's Instance API and int-indexed attributes.
  */
 public abstract class HALeafNode implements HANode {
     public VarStats stats;
@@ -47,13 +46,12 @@ public abstract class HALeafNode implements HANode {
 
     private void updateObservers(Instance inst, double y, double w, HoeffdingAdaptiveTreeRegressor tree) {
         int classIdx = inst.classIndex();
-        List<Integer> nominalAtts = tree.nominalAttributeIndices;
         for (int i = 0; i < inst.numAttributes(); i++) {
             if (i == classIdx || disabledAtts.contains(i)) continue;
             if (Double.isNaN(inst.value(i))) continue;
             HAAttributeObserver obs = observers.get(i);
             if (obs == null) {
-                boolean isNominal = inst.attribute(i).isNominal() || (nominalAtts != null && nominalAtts.contains(i));
+                boolean isNominal = inst.attribute(i).isNominal();
                 obs = isNominal ? new HANominalObserver() : defaultObserver.createNew();
                 observers.put(i, obs);
             }

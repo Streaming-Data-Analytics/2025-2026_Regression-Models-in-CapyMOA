@@ -25,9 +25,7 @@ public abstract class HABranchNode implements HANode {
         return (idx >= 0 && idx < children.size()) ? children.get(idx) : null;
     }
 
-    public int maxBranches() { return 2; } // override for multiway
-
-    /** Traverse to a leaf following the instance. */
+/** Traverse to a leaf following the instance. */
     public HALeafNode traverseToLeaf(Instance inst) {
         HANode cur = this;
         while (cur instanceof HABranchNode) {

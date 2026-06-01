@@ -3,8 +3,7 @@ package moa.classifiers.trees.hatr;
 import com.yahoo.labs.samoa.instances.Instance;
 
 /**
- * Online linear regression for HATR leaf nodes — faithful to River's
- * {@code linear_model.LinearRegression} defaults:
+ * Online linear regression for HATR leaf nodes 
  *   - SGD optimizer, learning rate 0.01 (constant)
  *   - Squared loss, whose gradient is {@code 2*(y_pred - y_true)}
  *   - intercept updated separately with its own (constant) learning rate
@@ -52,13 +51,12 @@ public class HAPerceptron {
         ensureCapacity(inst.numAttributes());
         double pred = predict(inst);
 
-        // River: loss_gradient = Squared.gradient(y, pred) * w, then clamped.
+        // loss_gradient = Squared.gradient(y, pred) * w, then clamped.
         // Squared.gradient(y_true, y_pred) = 2 * (y_pred - y_true).
         double lossGrad = 2.0 * (pred - y) * w;
         if (lossGrad > CLIP_GRADIENT) lossGrad = CLIP_GRADIENT;
         if (lossGrad < -CLIP_GRADIENT) lossGrad = -CLIP_GRADIENT;
 
-        // Intercept update (handled separately, like River's GLM).
         intercept -= interceptLr * lossGrad;
 
         // Weight update via SGD: w_i -= lr * (loss_gradient * x_i + l2 * w_i).

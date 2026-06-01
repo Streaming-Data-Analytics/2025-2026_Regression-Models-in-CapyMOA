@@ -3,7 +3,7 @@ package moa.classifiers.trees.hatr;
 import com.yahoo.labs.samoa.instances.Instance;
 import java.util.Random;
 
-/** Adaptive leaf predicting with an online linear model (River-equivalent LinearRegression). */
+/** Adaptive leaf predicting with an online linear model. */
 public class AdaLeafModel extends AdaLeafNode {
     public HAPerceptron model;
 

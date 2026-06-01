@@ -14,8 +14,6 @@ import java.util.*;
  *  - On drift, grows an alternate subtree in background
  *  - Runs a z-test when both subtrees are mature; swaps if alternate is significantly better
  *  - traverse() collects leaves from main tree AND alternate trees (for averaging in predict_one)
- *
- * Equivalent to River's AdaBranchRegressor, fully adapted to MOA's Instance API.
  */
 public abstract class AdaBranchNode extends HABranchNode {
     public ADWINDetector driftDetector;
@@ -64,7 +62,7 @@ public abstract class AdaBranchNode extends HABranchNode {
                 double altN = altErr.getN(), curN = errorTracker.getN();
                 if (altN > tree.driftWindowThreshold && curN > tree.driftWindowThreshold) {
                     double altMu = altErr.getMean(), curMu = errorTracker.getMean();
-                    double altV = altErr.get(),     curV  = errorTracker.get();
+                    double altV = altErr.get(), curV = errorTracker.get();
                     double denom = Math.sqrt(altV / altN + curV / curN);
                     double z = (denom > 1e-12) ? (altMu - curMu) / denom : 0.0;
                     double p = 2.0 * NormalDist.cdf(-Math.abs(z));
@@ -72,9 +70,6 @@ public abstract class AdaBranchNode extends HABranchNode {
                     if (p <= tree.switchSignificance) {
                         if (altMu < curMu) {
                             // Alternate is better → swap.
-                            // Mirror River: _n_active_leaves -= self.n_leaves (all leaves, incl. alternates),
-                            //               _n_active_leaves += alternate.n_leaves,
-                            //               kill_tree_children (decrements per-leaf).
                             tree.nActiveLeaves -= this.iterLeaves().size();
                             tree.nActiveLeaves += alternateTree.iterLeaves().size();
                             killChildren(tree);
@@ -100,14 +95,13 @@ public abstract class AdaBranchNode extends HABranchNode {
 
         // Forward to the appropriate child.
         // For nominal multiway branches, unseen categories get a new child leaf
-        // (mirrors River's AdaBranchRegressor.learn_one: KeyError → add_child).
         HANode child = null;
         int childBranch = -1;
 
         if (this instanceof AdaNomMultiwayBranch) {
             AdaNomMultiwayBranch nomBranch = (AdaNomMultiwayBranch) this;
             double featureVal = inst.value(attIndex);
-            // Missing feature (NaN): mirrors River's "self.feature in x" check → fall through
+            // Missing feature (NaN): fall through
             // to mostCommonChildIndex() rather than creating a child for category 0.
             if (!Double.isNaN(featureVal)) {
                 int catIdx = (int) featureVal;
@@ -153,7 +147,6 @@ public abstract class AdaBranchNode extends HABranchNode {
 
     /**
      * Recursively clean up children: decrement leaf counters, remove alternate trees.
-     * Equivalent to River's kill_tree_children.
      */
     @Override
     public void killChildren(Object treeObj) {
@@ -202,7 +195,6 @@ public abstract class AdaBranchNode extends HABranchNode {
 
     /**
      * Override iterLeaves to also include alternate tree leaves.
-     * Matches River's AdaBranchRegressor.iter_leaves.
      */
     @Override
     public List<HALeafNode> iterLeaves() {
