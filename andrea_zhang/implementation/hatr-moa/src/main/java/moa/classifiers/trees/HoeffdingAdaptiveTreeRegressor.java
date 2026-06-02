@@ -84,9 +84,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
         "Stop tree growth (rather than deactivate leaves) when memory limit is hit.");
 
     public FlagOption removePoorAttrsOption = new FlagOption("removePoorAttrs", 'R',
-        "Disable poor attributes to save memory (mirrors River's remove_poor_attrs). Default: False.");
-
-    // Internal state
+        "Disable poor attributes to save memory.");
 
     public HANode root;
     public int nActiveLeaves;
@@ -95,7 +93,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
     public int nPrunedAlternateTrees;
     public int nSwitchAlternateTrees;
 
-    // Resolved options (cached for efficiency — avoids Option.getValue() per sample)
+    // Resolved options (cached to avoid Option.getValue() overhead per sample)
     public int gracePeriod;
     public double delta;
     public double tau;
@@ -115,7 +113,6 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
 
     public HAAttributeObserver numericObserverProto;
 
-    // Memory management state
     public long maxByteSize;
     public int memoryEstimatePeriod;
     public boolean stopMemManagement;
@@ -237,10 +234,6 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
 
     // Internal factory methods (called by node classes)
 
-    /**
-     * Create a new adaptive leaf at the given depth.
-     * Inherits fmse values from parent if parent is AdaLeafAdaptive.
-     */
     public HALeafNode newLeaf(HALeafNode parent, int depth) {
         ADWINDetector det = driftDetectorProto.createNew();
 
@@ -272,11 +265,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
         }
     }
 
-    /**
-     * Attempt to split a leaf using the Hoeffding bound criterion.
-     * Creates an adaptive branch node if the split is guaranteed.
-     * Called by AdaLeafNode.adaLearnOne after grace period.
-     */
+    /** Hoeffding bound split check; replaces leaf with an adaptive branch if split is justified. */
     public void attemptToSplit(HALeafNode leaf, HABranchNode parent, int parentBranch, ADWINDetector branchDriftDet) {
         List<SplitCandidate> candidates = leaf.bestSplitCandidates(this);
         Collections.sort(candidates);
@@ -360,11 +349,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
         }
     }
 
-    /**
-     * Periodically estimates the model's memory footprint and triggers
-     * enforceTrackerLimit() if the tree exceeds maxByteSize.
-     * Silently disabled when the SizeOf agent is absent (SizeOf returns -1).
-     */
+    /** Estimates memory footprint; calls enforceTrackerLimit() if over budget. No-op without SizeOf agent. */
     public void estimateModelByteSizes() {
         if (root == null) return;
         List<HALeafNode> leaves = root.iterLeaves();
@@ -387,10 +372,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
             enforceTrackerLimit();
     }
 
-    /**
-     * Deactivates the least-promising leaves (deepest first) until the tree fits
-     * within maxByteSize, re-activating previously inactive leaves when possible.
-     */
+    /** Deactivates least-promising leaves (deepest first) until the tree fits in maxByteSize. */
     public void enforceTrackerLimit() {
         if (nInactiveLeaves > 0 ||
                 (nActiveLeaves * activeLeafByteSizeEstimate

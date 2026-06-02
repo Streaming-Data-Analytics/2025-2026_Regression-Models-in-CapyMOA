@@ -5,15 +5,9 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- *  - Per-bucket variance tracking (Babcock et al. 2003)
- *  - epsilon formula: sqrt(2 * m_recip * variance_in_window * delta') + 2/3 * m_recip * delta'
- *    where delta' = log(2 * log(width) / delta)
- *  - scan order: oldest row → newest row, oldest slot → newest slot within row
- *  - compress direction: merges the two OLDEST slots in a row when overflow
- *  - delete_element removes ONE oldest bucket at a time; while-loop keeps shrinking until no drift
- *
- * This is the formulation from:
- *   Babcock et al., "Maintaining Variance and k-Medians over Data Stream Windows", PODS 2003.
+ * ADWIN drift detector with per-bucket variance tracking (Babcock et al., PODS 2003).
+ * Scans from oldest to newest bucket; compresses by merging the two oldest slots
+ * in a row when it overflows.
  */
 public class ADWINDetector {
     private final double delta;

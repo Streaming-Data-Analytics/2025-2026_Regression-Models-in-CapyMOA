@@ -8,12 +8,8 @@ import java.util.*;
 
 /**
  * Abstract adaptive branch node for HATR.
- *
- * Core of the adaptive algorithm:
- *  - Monitors prediction errors with an ADWIN drift detector
- *  - On drift, grows an alternate subtree in background
- *  - Runs a z-test when both subtrees are mature; swaps if alternate is significantly better
- *  - traverse() collects leaves from main tree AND alternate trees (for averaging in predict_one)
+ * Monitors prediction error with ADWIN; on drift grows an alternate subtree in the
+ * background and swaps it in via z-test once both trees are mature enough to compare.
  */
 public abstract class AdaBranchNode extends HABranchNode {
     public ADWINDetector driftDetector;
@@ -43,7 +39,7 @@ public abstract class AdaBranchNode extends HABranchNode {
         errorTracker.update(err, 1.0);
         boolean driftOccurred = driftDetector.isDrift();
 
-        // Error is decreasing → no real concept drift
+        // Error is decreasing, so ignore the detection
         if (driftOccurred && errorTracker.getMean() < oldMean) {
             errorTracker = new VarStats();
             driftOccurred = false;
@@ -69,7 +65,7 @@ public abstract class AdaBranchNode extends HABranchNode {
 
                     if (p <= tree.switchSignificance) {
                         if (altMu < curMu) {
-                            // Alternate is better → swap.
+                            // Alternate is better: swap.
                             tree.nActiveLeaves -= this.iterLeaves().size();
                             tree.nActiveLeaves += alternateTree.iterLeaves().size();
                             killChildren(tree);
@@ -78,7 +74,7 @@ public abstract class AdaBranchNode extends HABranchNode {
                             tree.nSwitchAlternateTrees++;
                             return;
                         } else {
-                            // Current is better → prune alternate
+                            // Current is better: prune alternate
                             killNode(alternateTree, tree);
                             alternateTree = null;
                             tree.nPrunedAlternateTrees++;

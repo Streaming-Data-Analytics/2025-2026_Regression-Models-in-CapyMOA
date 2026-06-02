@@ -12,7 +12,7 @@ import java.util.Random;
  *
  * Learning order matches River exactly:
  *   1. prediction BEFORE update (for drift error)
- *   2. bootstrap sampling (Poisson(1)) → effective weight w
+ *   2. bootstrap sampling (Poisson(1)), effective weight w
  *   3. drift detector update with |y - yPred|
  *   4. model-selector update (adaptive fmse), using stats/model BEFORE update
  *   5. update target stats + attribute observers (with bootstrapped w)
@@ -49,7 +49,7 @@ public abstract class AdaLeafNode extends HALeafNode {
         driftDetector.update(err);
         errorTracker.update(err, 1.0);
         if (driftDetector.isDrift() && errorTracker.getMean() < oldMeanErr) {
-            errorTracker = new VarStats(); // error decreasing → not a real drift
+            errorTracker = new VarStats(); // error is improving, ignore
         }
 
         // Model-selector statistics must use the pre-update target stats / model.

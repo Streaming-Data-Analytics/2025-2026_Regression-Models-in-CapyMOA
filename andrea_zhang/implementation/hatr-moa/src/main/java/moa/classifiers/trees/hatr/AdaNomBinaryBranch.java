@@ -2,7 +2,7 @@ package moa.classifiers.trees.hatr;
 
 import com.yahoo.labs.samoa.instances.Instance;
 
-/** Adaptive nominal binary branch: x[attIndex] == nomVal (by index) → left, else right. */
+/** Adaptive nominal binary branch: left if x[attIndex] == nomVal, else right. */
 public class AdaNomBinaryBranch extends AdaBranchNode {
     public final int nomValIndex;
 

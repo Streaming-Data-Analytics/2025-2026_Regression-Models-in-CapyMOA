@@ -3,15 +3,9 @@ package moa.classifiers.trees.hatr;
 import com.yahoo.labs.samoa.instances.Instance;
 
 /**
- * Online linear regression for HATR leaf nodes 
- *   - SGD optimizer, learning rate 0.01 (constant)
- *   - Squared loss, whose gradient is {@code 2*(y_pred - y_true)}
- *   - intercept updated separately with its own (constant) learning rate
- *   - L2 = 0, gradient clipped to ±clipGradient (1e12)
- *   - weights and intercept initialized to 0
- *
- * Weights are indexed by attribute position in the Instance.
- * New features (unseen attribute indices) start with weight 0.
+ * Online linear regression (SGD, squared loss) for HATR leaf nodes.
+ * Gradient is clipped to ±1e12 before updating weights and intercept.
+ * Weights are indexed by attribute position; unseen attributes start at 0.
  */
 public class HAPerceptron {
     private double[] weights;

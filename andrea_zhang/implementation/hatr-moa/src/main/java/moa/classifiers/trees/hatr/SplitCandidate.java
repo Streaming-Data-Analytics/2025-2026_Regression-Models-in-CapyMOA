@@ -33,7 +33,7 @@ public class SplitCandidate implements Comparable<SplitCandidate> {
         this.isNumeric = true; this.childrenStats = children;
     }
 
-    /** Nominal binary split: value == nominalValue → left, else → right. */
+    /** Nominal binary split: left if value == nominalValue, else right. */
     public SplitCandidate(double merit, int attIndex, int nominalValue, List<VarStats> children) {
         this.merit = merit; this.attIndex = attIndex;
         this.numericThreshold = Double.NaN; this.nominalValue = nominalValue; this.nominalValues = null;
