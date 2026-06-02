@@ -12,26 +12,63 @@ _LEAF_PREDICTION = {"mean": "MEAN", "model": "MODEL", "adaptive": "ADAPTIVE"}
 class HoeffdingAdaptiveTreeRegressor(MOARegressor):
     """Hoeffding Adaptive Tree Regressor (HATR).
 
-    A regression Hoeffding Tree that uses an ADWIN concept-drift detector at each
-    decision node to monitor changes in the data distribution. When a drift is
-    detected in a node, an alternate subtree is grown in the background; once it has
-    seen enough instances, a z-test decides whether to replace the current subtree
-    with the (significantly better) alternate one.
+    Regression Hoeffding Tree with ADWIN-based concept drift detection.
+    Each internal node runs an ADWIN detector on prediction error; on drift
+    an alternate subtree grows in the background and a z-test decides when
+    to swap it in place of the current subtree.
 
-    This is a native MOA port of River's ``HoeffdingAdaptiveTreeRegressor`` and is
-    numerically equivalent to it in the deterministic configuration
-    (``leaf_prediction="mean"``, ``bootstrap_sampling=False``). With bootstrap
-    sampling the two libraries cannot match instance-by-instance because the random
-    number generators differ (Python's Mersenne Twister vs Java's
-    ``java.util.Random``); only aggregate metrics are comparable.
+    Numerically equivalent to River's ``HoeffdingAdaptiveTreeRegressor`` in
+    the deterministic configuration (``leaf_prediction="mean"``,
+    ``bootstrap_sampling=False``).  With bootstrap sampling only aggregate
+    metrics are comparable because the RNGs differ.
 
-    Reference:
+    Reference: Bifet & Gavaldà, IDA 2009.
+    https://doi.org/10.1007/978-3-642-03915-7_22
 
-    `Bifet, Albert, and Ricard Gavaldà. "Adaptive learning from evolving data
-    streams." International Symposium on Intelligent Data Analysis, 2009.
-    <https://doi.org/10.1007/978-3-642-03915-7_22>`_
+    Parameters
+    ----------
+    schema :
+        Stream schema.
+    grace_period :
+        Instances a leaf observes between split attempts.
+    split_confidence :
+        Significance level (delta) for the Hoeffding bound.
+    tie_threshold :
+        Force a split to break ties when the bound falls below this value.
+    leaf_prediction :
+        ``"mean"``, ``"model"`` (perceptron), or ``"adaptive"``.
+    model_selector_decay :
+        EWMA decay for the adaptive leaf's model selector.
+    bootstrap_sampling :
+        Poisson(1) bootstrap sampling in leaf updates.
+    drift_window_threshold :
+        Minimum instances the alternate tree must see before the z-test runs.
+    switch_significance :
+        p-value threshold for the z-test swap decision.
+    min_samples_split :
+        Minimum samples per branch for a split candidate to be valid.
+    max_depth :
+        Maximum tree depth; ``None`` means unlimited.
+    tebst_digits :
+        Rounding digits for the Truncated E-BST numeric observer.
+    merit_preprune :
+        Enable merit-based pre-pruning.
+    adwin_delta :
+        Delta parameter for per-node ADWIN detectors.
+    learning_ratio :
+        Learning rate for the perceptron leaf model.
+    max_size_mb :
+        Memory limit in MB (requires SizeOf agent; silently disabled otherwise).
+    memory_estimate_period :
+        Instances between memory checks.
+    stop_mem_management :
+        Stop growing (instead of deactivating leaves) when the limit is hit.
+    remove_poor_attrs :
+        Disable attributes with consistently poor merit.
+    random_seed :
+        Seed for bootstrap sampling.
 
-    Example usage (requires the HATR class on the MOA classpath):
+    Example usage (requires the HATR JAR on the MOA classpath)::
 
         from capymoa.datasets import Fried
         from capymoa.regressor import HoeffdingAdaptiveTreeRegressor
@@ -66,41 +103,6 @@ class HoeffdingAdaptiveTreeRegressor(MOARegressor):
         remove_poor_attrs: bool = False,
         random_seed: Optional[int] = None,
     ) -> None:
-        """Construct a Hoeffding Adaptive Tree Regressor.
-
-        :param schema: The schema of the stream.
-        :param grace_period: Number of instances a leaf should observe between split attempts.
-        :param split_confidence: Significance level (delta) for the Hoeffding bound; values
-            close to 0 imply longer split-decision delays.
-        :param tie_threshold: Threshold below which a split is forced to break ties.
-        :param leaf_prediction: Prediction mechanism at the leaves: ``"mean"`` (target mean),
-            ``"model"`` (online linear model), or ``"adaptive"`` (chooses dynamically).
-        :param model_selector_decay: Decay factor of the faded squared errors used by the
-            adaptive leaf to choose between mean and model predictions.
-        :param bootstrap_sampling: If True, apply Poisson(1) bootstrap sampling in the leaves.
-        :param drift_window_threshold: Minimum number of instances an alternate tree must
-            observe before being considered as a replacement.
-        :param switch_significance: p-value threshold of the z-test used to swap a subtree
-            with its alternate tree.
-        :param min_samples_split: Minimum number of samples each branch of a split candidate
-            must have for the split to be valid.
-        :param max_depth: Maximum tree depth. ``None`` means unlimited.
-        :param tebst_digits: Number of decimal places used to round feature values in the
-            Truncated E-BST numeric attribute observer.
-        :param merit_preprune: If True, enable merit-based pre-pruning (null-split option).
-        :param adwin_delta: Delta parameter of the per-node ADWIN drift detectors.
-        :param learning_ratio: Learning rate of the linear (perceptron) leaf model.
-        :param max_size_mb: Maximum memory consumed by the tree in MB. Requires the
-            SizeOf agent (``-javaagent:sizeofag.jar`` and ``--add-opens`` flags); silently
-            disabled otherwise.
-        :param memory_estimate_period: Number of instances between memory consumption
-            checks. Only relevant when ``max_size_mb`` is active.
-        :param stop_mem_management: If True, stop growing the tree (rather than
-            deactivating leaves) when the memory limit is hit.
-        :param remove_poor_attrs: If True, disable attributes with consistently poor
-            merit to save memory. Default: False.
-        :param random_seed: Random seed for reproducibility (used by bootstrap sampling).
-        """
         leaf = leaf_prediction.lower()
         if leaf not in _LEAF_PREDICTION:
             raise ValueError(
@@ -114,19 +116,23 @@ class HoeffdingAdaptiveTreeRegressor(MOARegressor):
         cli.append(f"-t {tie_threshold}")
         cli.append(f"-l {_LEAF_PREDICTION[leaf]}")
         cli.append(f"-e {model_selector_decay}")
-        cli.append("-b") if bootstrap_sampling else None
+        if bootstrap_sampling:
+            cli.append("-b")
         cli.append(f"-w {drift_window_threshold}")
         cli.append(f"-s {switch_significance}")
         cli.append(f"-m {min_samples_split}")
         cli.append(f"-D {max_depth if max_depth is not None else -1}")
         cli.append(f"-z {tebst_digits}")
-        cli.append("-p") if merit_preprune else None
+        if merit_preprune:
+            cli.append("-p")
         cli.append(f"-A {adwin_delta}")
         cli.append(f"-L {learning_ratio}")
         cli.append(f"-M {max_size_mb}")
         cli.append(f"-E {memory_estimate_period}")
-        cli.append("-S") if stop_mem_management else None
-        cli.append("-R") if remove_poor_attrs else None
+        if stop_mem_management:
+            cli.append("-S")
+        if remove_poor_attrs:
+            cli.append("-R")
 
         self.moa_learner = _MOA_HoeffdingAdaptiveTreeRegressor()
 
