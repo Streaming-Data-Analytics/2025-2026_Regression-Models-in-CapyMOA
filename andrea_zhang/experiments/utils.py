@@ -59,6 +59,62 @@ def make_synthetic(n=10000, drift_at=5000, seed=42):
     return X, y, schema
 
 
+def make_fried_drift(n=40000, drift_at=20000, seed=42):
+    """Friedman con drift abrupt a drift_at: relazione cambia da x0-x4 a x5-x9."""
+    rng = np.random.RandomState(seed)
+    X = rng.uniform(0, 1, (n, 10))
+    noise = rng.randn(n)
+    y_pre  = (10*np.sin(np.pi*X[:,0]*X[:,1]) + 20*(X[:,2]-0.5)**2
+              + 10*X[:,3] + 5*X[:,4] + noise)
+    y_post = (10*np.sin(np.pi*X[:,5]*X[:,6]) + 20*(X[:,7]-0.5)**2
+              + 10*X[:,8] + 5*X[:,9] + noise)
+    y = np.where(np.arange(n) < drift_at, y_pre, y_post)
+    schema = Schema.from_custom(
+        features=[f"x{i}" for i in range(10)] + ["y"],
+        target="y", categories=None, name="fried_drift")
+    return X, y, schema
+
+
+def make_rbf_regression(n=30000, drift_at=15000, n_centers=5, n_features=10, seed=42):
+    """RBF regression con drift graduale: i centroidi si spostano dopo drift_at."""
+    rng = np.random.RandomState(seed)
+    centers_a = rng.randn(n_centers, n_features)
+    centers_b = centers_a + 0.5 * rng.randn(n_centers, n_features)
+    weights   = rng.randn(n_centers, n_features)
+    X = rng.randn(n, n_features)
+    y = np.empty(n)
+    for i in range(n):
+        t = max(0.0, (i - drift_at) / (n - drift_at)) if i >= drift_at else 0.0
+        curr = (1 - t) * centers_a + t * centers_b
+        closest = int(np.argmin(np.sum((X[i] - curr) ** 2, axis=1)))
+        y[i] = float(weights[closest] @ X[i]) + 0.1 * rng.randn()
+    schema = Schema.from_custom(
+        features=[f"x{i}" for i in range(n_features)] + ["y"],
+        target="y", categories=None, name="rbf_regression")
+    return X, y, schema
+
+
+def load_electricity_demand(path, max_instances=None):
+    """Carica electricity.arff usando nswdemand come target di regressione."""
+    from scipy.io import arff
+    import pandas as pd
+    data, _ = arff.loadarff(path)
+    df = pd.DataFrame(data)
+    # day è categorico ({1..7}) — scipy restituisce byte string, decode esplicito
+    for col in df.columns:
+        if df[col].dtype == object:
+            df[col] = df[col].str.decode('utf-8')
+    feat_cols = ['date', 'day', 'period', 'nswprice', 'vicprice', 'vicdemand', 'transfer']
+    X = df[feat_cols].astype(float).values
+    y = df['nswdemand'].astype(float).values
+    if max_instances:
+        X, y = X[:max_instances], y[:max_instances]
+    schema = Schema.from_custom(
+        features=feat_cols + ['nswdemand'],
+        target='nswdemand', categories=None, name='electricity_demand')
+    return X, y, schema
+
+
 # Helpers interni ai runner
 
 def river_dict(row):
