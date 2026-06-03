@@ -110,90 +110,89 @@ def build_capy(cfg, schema, base):
 
 # Runner prequential
 
-def prequential_river(X, y, cfg, base, scale=True):
-    """Valutazione prequential (predici-poi-allena) con River. Restituisce (preds, model)."""
-    model = build_river(cfg, base)
+def prequential_eval(X, y, framework, cfg, base,
+                     schema=None, scale=True,
+                     time_algo=False, sample_every=None):
+    """Valutazione prequential unificata per River e CapyMOA.
+
+    framework   : "river" | "capy"
+    schema      : richiesto se framework="capy"
+    time_algo   : misura t_predict e t_train escludendo conversione JNI (capy)
+    sample_every: campiona model_MB/mae/rmse ogni N istanze
+
+    Restituisce (preds, model, t_predict, t_train, trace)
+      t_predict = t_train = 0.0  se time_algo=False
+      trace = []                 se sample_every=None
+    """
+    is_capy = framework == "capy"
+    if is_capy and schema is None:
+        raise ValueError("schema richiesto per framework='capy'")
+
+    model  = build_capy(cfg, schema, base) if is_capy else build_river(cfg, base)
     scaler = river_prep.StandardScaler() if scale else None
-    preds = np.empty(len(X))
-    for i in range(len(X)):
-        x = river_dict(X[i])
-        xp = scaler.transform_one(x) if scaler else x
-        preds[i] = model.predict_one(xp) or 0.0
-        if scaler:
-            scaler.learn_one(x)
-            xl = scaler.transform_one(x)
+    nfeat  = X.shape[1]
+    n      = len(X)
+    preds  = np.empty(n)
+    t_predict = t_train = 0.0
+    trace  = []
+    w_abs, w_sq = [], []
+
+    for i in range(n):
+        x_dict = river_dict(X[i])
+
+        # predict
+        if is_capy:
+            arr    = scaled_array(scaler, x_dict, nfeat) if scaler else X[i]
+            inst_p = RegressionInstance(schema, (arr, float(y[i])))
+            if time_algo:
+                _ = inst_p.java_instance  # forza conversione numpy->Java prima del timer
+                t0 = perf_counter()
+            pred = model.predict(inst_p) or 0.0
+            if time_algo:
+                t_predict += perf_counter() - t0
         else:
-            xl = x
-        model.learn_one(xl, float(y[i]))
-    return preds, model
+            xp   = scaler.transform_one(x_dict) if scaler else x_dict
+            if time_algo:
+                t0 = perf_counter()
+            pred = model.predict_one(xp) or 0.0
+            if time_algo:
+                t_predict += perf_counter() - t0
+        preds[i] = pred
 
-
-def prequential_capy(X, y, schema, cfg, base, scale=True):
-    """Valutazione prequential (predici-poi-allena) con CapyMOA. Restituisce (preds, learner)."""
-    learner = build_capy(cfg, schema, base)
-    scaler = river_prep.StandardScaler() if scale else None
-    nfeat = X.shape[1]
-    preds = np.empty(len(X))
-    for i in range(len(X)):
         if scaler:
-            x = river_dict(X[i])
-            arr = scaled_array(scaler, x, nfeat)
-        else:
-            arr = X[i]
-        preds[i] = learner.predict(RegressionInstance(schema, (arr, float(y[i])))) or 0.0
-        if scaler:
-            scaler.learn_one(x)
-            arr2 = scaled_array(scaler, x, nfeat)
-        else:
-            arr2 = X[i]
-        learner.train(RegressionInstance(schema, (arr2, float(y[i]))))
-    return preds, learner
+            scaler.learn_one(x_dict)
 
-
-# Runner cronometrati
-
-def timed_prequential_river(X, y, cfg, base, scale=True):
-    """Come prequential_river, ma restituisce (t_pred, t_train, model)."""
-    model = build_river(cfg, base)
-    scaler = river_prep.StandardScaler() if scale else None
-    t_pred = t_train = 0.0
-    for i in range(len(X)):
-        x = river_dict(X[i])
-        xp = scaler.transform_one(x) if scaler else x
-        t0 = perf_counter(); _ = model.predict_one(xp) or 0.0; t_pred += perf_counter() - t0
-        if scaler:
-            scaler.learn_one(x)
-            xl = scaler.transform_one(x)
+        # train
+        if is_capy:
+            arr2   = scaled_array(scaler, x_dict, nfeat) if scaler else X[i]
+            inst_t = RegressionInstance(schema, (arr2, float(y[i])))
+            if time_algo:
+                _ = inst_t.java_instance  # forza conversione numpy->Java prima del timer
+                t0 = perf_counter()
+            model.train(inst_t)
+            if time_algo:
+                t_train += perf_counter() - t0
         else:
-            xl = x
-        t0 = perf_counter(); model.learn_one(xl, float(y[i])); t_train += perf_counter() - t0
-    return t_pred, t_train, model
+            xl = scaler.transform_one(x_dict) if scaler else x_dict
+            if time_algo:
+                t0 = perf_counter()
+            model.learn_one(xl, float(y[i]))
+            if time_algo:
+                t_train += perf_counter() - t0
 
+        if sample_every:
+            w_abs.append(abs(y[i] - pred))
+            w_sq.append((y[i] - pred) ** 2)
+            if (i + 1) % sample_every == 0:
+                mb = capy_model_mb(model) if is_capy else river_model_mb(model)
+                trace.append(dict(
+                    n        = i + 1,
+                    model_MB = mb,
+                    mae      = float(np.mean(w_abs[-sample_every:])),
+                    rmse     = float(np.sqrt(np.mean(w_sq[-sample_every:]))),
+                ))
 
-def timed_prequential_capy(X, y, schema, cfg, base, scale=True):
-    """Come prequential_capy, ma restituisce (t_pred, t_train, learner)."""
-    learner = build_capy(cfg, schema, base)
-    scaler = river_prep.StandardScaler() if scale else None
-    nfeat = X.shape[1]
-    t_pred = t_train = 0.0
-    for i in range(len(X)):
-        if scaler:
-            x = river_dict(X[i])
-            arr = scaled_array(scaler, x, nfeat)
-        else:
-            arr = X[i]
-        inst_p = RegressionInstance(schema, (arr, float(y[i])))
-        _ = inst_p.java_instance  # forza conversione numpy→Java prima del timer
-        t0 = perf_counter(); _ = learner.predict(inst_p) or 0.0; t_pred += perf_counter() - t0
-        if scaler:
-            scaler.learn_one(x)
-            arr2 = scaled_array(scaler, x, nfeat)
-        else:
-            arr2 = X[i]
-        inst_t = RegressionInstance(schema, (arr2, float(y[i])))
-        _ = inst_t.java_instance  # forza conversione numpy→Java prima del timer
-        t0 = perf_counter(); learner.train(inst_t); t_train += perf_counter() - t0
-    return t_pred, t_train, learner
+    return preds, model, t_predict, t_train, trace
 
 
 # Dimensione modello
@@ -211,67 +210,6 @@ def capy_model_mb(learner):
         return float("nan")
     size = _MoaSizeOf.fullSizeOf(learner.moa_learner)
     return size / 1e6 if size > 0 else float("nan")
-
-
-# Runner con campionamento a intervalli
-
-def traced_prequential_river(X, y, cfg, base, scale=True, sample_every=500):
-    """Prequential River con snapshot periodici di model_MB, mae, rmse. Restituisce lista di dict."""
-    model = build_river(cfg, base)
-    scaler = river_prep.StandardScaler() if scale else None
-    trace = []
-    w_abs, w_sq = [], []
-    for i in range(len(X)):
-        x = river_dict(X[i])
-        xp = scaler.transform_one(x) if scaler else x
-        pred = model.predict_one(xp) or 0.0
-        err = y[i] - pred
-        w_abs.append(abs(err)); w_sq.append(err ** 2)
-        if scaler:
-            scaler.learn_one(x)
-            xl = scaler.transform_one(x)
-        else:
-            xl = x
-        model.learn_one(xl, float(y[i]))
-        if (i + 1) % sample_every == 0:
-            win = w_abs[-sample_every:]; wsq = w_sq[-sample_every:]
-            trace.append(dict(n=i + 1,
-                              model_MB=river_model_mb(model),
-                              mae=float(np.mean(win)),
-                              rmse=float(np.sqrt(np.mean(wsq)))))
-    return trace
-
-
-def traced_prequential_capy(X, y, schema, cfg, base, scale=True, sample_every=500):
-    """Prequential CapyMOA con snapshot periodici di model_MB, mae, rmse. Restituisce lista di dict."""
-    learner = build_capy(cfg, schema, base)
-    scaler = river_prep.StandardScaler() if scale else None
-    nfeat = X.shape[1]
-    trace = []
-    w_abs, w_sq = [], [] # errori assoluti e quadratici
-    for i in range(len(X)):
-        if scaler:
-            x = river_dict(X[i])
-            arr = scaled_array(scaler, x, nfeat)
-        else:
-            arr = X[i]
-        inst_p = RegressionInstance(schema, (arr, float(y[i])))
-        pred = learner.predict(inst_p) or 0.0
-        err = y[i] - pred
-        w_abs.append(abs(err)); w_sq.append(err ** 2)
-        if scaler:
-            scaler.learn_one(x)
-            arr2 = scaled_array(scaler, x, nfeat)
-        else:
-            arr2 = X[i]
-        learner.train(RegressionInstance(schema, (arr2, float(y[i]))))
-        if (i + 1) % sample_every == 0:
-            win = w_abs[-sample_every:]; wsq = w_sq[-sample_every:]
-            trace.append(dict(n=i + 1,
-                              model_MB=capy_model_mb(learner),
-                              mae=float(np.mean(win)),
-                              rmse=float(np.sqrt(np.mean(wsq)))))
-    return trace
 
 
 # Metriche
