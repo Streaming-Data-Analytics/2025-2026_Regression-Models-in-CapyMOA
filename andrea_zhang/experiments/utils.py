@@ -288,6 +288,9 @@ def cum_rmse(yt, yp):
 def win_mae(yt, yp, w=500):
     return np.convolve(np.abs(yt - yp), np.ones(w) / w, mode="valid")
 
+def win_rmse(yt, yp, w=500):
+    return np.sqrt(np.convolve((yt - yp) ** 2, np.ones(w) / w, mode="valid"))
+
 def cum_r2(yt, yp):
     r2_arr = np.empty(len(yt))
     for i in range(1, len(yt) + 1):
