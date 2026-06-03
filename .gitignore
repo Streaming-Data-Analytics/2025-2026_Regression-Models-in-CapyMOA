@@ -1,3 +1,20 @@
 .DS_Store
 
 .idea
+
+andrea_zhang/implementation/hatr-moa/target
+
+*__pycache__
+*.aux
+*fdb_latexmk
+*.fls
+*.log
+*.out
+*.nav
+*.snm
+*.synctex.gz
+*.toc
+*.vrb
+*.tex
+
+*.arff

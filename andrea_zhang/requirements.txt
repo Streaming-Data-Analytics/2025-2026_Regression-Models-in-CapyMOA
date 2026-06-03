@@ -1,0 +1,29 @@
+# Runtime 
+# Python 3.11  |  Java 11+ (tested with OpenJDK 25.0.2)
+#
+# Install (recommended: conda env):
+#   conda create -n sda_project python=3.11
+#   conda activate sda_project
+#   pip install -r requirements.txt
+#
+# Build the HATR JAR before running any notebook:
+#   cd andrea_zhang/implementation/hatr-moa
+#   mvn package -DskipTests
+
+# Core frameworks
+capymoa==0.13.0
+river==0.24.2
+JPype1==1.6.0
+
+# Data / numerics
+numpy==2.4.4
+pandas==2.3.3
+scipy==1.17.1
+scikit-learn==1.8.0
+
+# Visualisation
+matplotlib==3.10.9
+
+# Memory profiling (hatr-crossframework-performance.ipynb)
+pympler==1.1
+psutil==7.0.0
