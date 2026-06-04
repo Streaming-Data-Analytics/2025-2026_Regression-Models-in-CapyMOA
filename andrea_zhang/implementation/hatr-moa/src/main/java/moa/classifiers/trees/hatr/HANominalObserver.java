@@ -24,10 +24,10 @@ public class HANominalObserver implements HAAttributeObserver {
     }
 
     @Override
-    public SplitCandidate bestSplitCandidate(int attIndex, VarStats preSplit, int minSamples) {
+    public SplitCandidate bestSplitCandidate(int attIndex, VarStats preSplit, int minSamples, boolean binarySplit) {
         SplitCandidate best = new SplitCandidate(); // null, merit = -inf
 
-        if (distPerVal.size() > 2) {
+        if (!binarySplit && distPerVal.size() > 2) {
             List<Map.Entry<Integer, VarStats>> sorted = new ArrayList<>(distPerVal.entrySet());
             sorted.sort(Map.Entry.comparingByKey());
 

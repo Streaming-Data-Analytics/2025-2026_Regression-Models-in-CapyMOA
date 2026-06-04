@@ -18,7 +18,7 @@ public class HAEBSTObserver implements HAAttributeObserver {
     }
 
     @Override
-    public SplitCandidate bestSplitCandidate(int attIndex, VarStats preSplit, int minSamples) {
+    public SplitCandidate bestSplitCandidate(int attIndex, VarStats preSplit, int minSamples, boolean binarySplit) {
         if (root == null) return new SplitCandidate();
         VarStats[] aux = {new VarStats()};
         return findBest(root, new SplitCandidate(), attIndex, preSplit, minSamples, aux);

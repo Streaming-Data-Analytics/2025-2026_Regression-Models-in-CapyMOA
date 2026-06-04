@@ -64,7 +64,7 @@ public abstract class HALeafNode implements HANode {
         List<SplitCandidate> candidates = new ArrayList<>();
         if (tree.meritPreprune) candidates.add(new SplitCandidate()); // null split
         for (Map.Entry<Integer, HAAttributeObserver> e : observers.entrySet()) {
-            candidates.add(e.getValue().bestSplitCandidate(e.getKey(), stats, tree.minSamplesSplit));
+            candidates.add(e.getValue().bestSplitCandidate(e.getKey(), stats, tree.minSamplesSplit, tree.binarySplit));
         }
         return candidates;
     }

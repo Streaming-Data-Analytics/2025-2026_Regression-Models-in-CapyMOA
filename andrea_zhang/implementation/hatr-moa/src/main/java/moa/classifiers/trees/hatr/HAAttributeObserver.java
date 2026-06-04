@@ -6,6 +6,6 @@ package moa.classifiers.trees.hatr;
  */
 public interface HAAttributeObserver {
     void observe(double attVal, double targetVal, double weight);
-    SplitCandidate bestSplitCandidate(int attIndex, VarStats preSplitDist, int minSamplesSplit);
+    SplitCandidate bestSplitCandidate(int attIndex, VarStats preSplitDist, int minSamplesSplit, boolean binarySplit);
     HAAttributeObserver createNew();
 }

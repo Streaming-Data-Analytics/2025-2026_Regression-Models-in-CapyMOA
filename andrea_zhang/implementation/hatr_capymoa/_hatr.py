@@ -7,6 +7,7 @@ from moa.classifiers.trees import (
 )
 
 _LEAF_PREDICTION = {"mean": "MEAN", "model": "MODEL", "adaptive": "ADAPTIVE"}
+_SPLITTER = {"tebst": 0, "qo": 1}
 
 
 class HoeffdingAdaptiveTreeRegressor(MOARegressor):
@@ -50,7 +51,8 @@ class HoeffdingAdaptiveTreeRegressor(MOARegressor):
     max_depth :
         Maximum tree depth; ``None`` means unlimited.
     tebst_digits :
-        Rounding digits for the Truncated E-BST numeric observer.
+        Rounding digits for the Truncated E-BST numeric observer (only used
+        when ``splitter="tebst"``).
     merit_preprune :
         Enable merit-based pre-pruning.
     adwin_delta :
@@ -65,6 +67,20 @@ class HoeffdingAdaptiveTreeRegressor(MOARegressor):
         Stop growing (instead of deactivating leaves) when the limit is hit.
     remove_poor_attrs :
         Disable attributes with consistently poor merit.
+    binary_split :
+        If ``True``, force binary splits only — disables multiway splits for
+        both the QO observer and the nominal attribute observer.
+    splitter :
+        Numeric attribute observer type: ``"tebst"`` (Truncated E-BST, default)
+        or ``"qo"`` (Quantization Observer).
+    qo_radius :
+        Quantization radius for the QO observer. Smaller values produce more
+        slots and finer split candidates at higher memory cost. It is advisable
+        to scale features before using QO (e.g. with ``StandardScaler``).
+    qo_allow_multiway :
+        If ``True`` and ``splitter="qo"``, allow the QO observer to propose
+        numeric multiway splits (one branch per quantization slot). Has no
+        effect when ``binary_split=True``.
     random_seed :
         Seed for bootstrap sampling.
 
@@ -101,6 +117,10 @@ class HoeffdingAdaptiveTreeRegressor(MOARegressor):
         memory_estimate_period: int = 1_000_000,
         stop_mem_management: bool = False,
         remove_poor_attrs: bool = False,
+        binary_split: bool = False,
+        splitter: str = "tebst",
+        qo_radius: float = 0.25,
+        qo_allow_multiway: bool = False,
         random_seed: Optional[int] = None,
     ) -> None:
         leaf = leaf_prediction.lower()
@@ -108,6 +128,12 @@ class HoeffdingAdaptiveTreeRegressor(MOARegressor):
             raise ValueError(
                 f"Invalid leaf_prediction '{leaf_prediction}'. "
                 f"Expected one of {list(_LEAF_PREDICTION)}."
+            )
+
+        splitter_key = splitter.lower()
+        if splitter_key not in _SPLITTER:
+            raise ValueError(
+                f"Invalid splitter '{splitter}'. Expected one of {list(_SPLITTER)}."
             )
 
         cli = []
@@ -133,6 +159,12 @@ class HoeffdingAdaptiveTreeRegressor(MOARegressor):
             cli.append("-S")
         if remove_poor_attrs:
             cli.append("-R")
+        if binary_split:
+            cli.append("-n")
+        cli.append(f"-q {_SPLITTER[splitter_key]}")
+        cli.append(f"-o {qo_radius}")
+        if qo_allow_multiway:
+            cli.append("-x")
 
         self.moa_learner = _MOA_HoeffdingAdaptiveTreeRegressor()
 

@@ -86,6 +86,20 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
     public FlagOption removePoorAttrsOption = new FlagOption("removePoorAttrs", 'R',
         "Disable poor attributes to save memory.");
 
+    public FlagOption binarySplitOption = new FlagOption("binarySplit", 'n',
+        "Force binary splits only (disables numeric and nominal multiway splits).");
+
+    public MultiChoiceOption numericObserverOption = new MultiChoiceOption("numericObserver", 'q',
+        "Numeric attribute observer type.",
+        new String[]{"TEBST", "QO"},
+        new String[]{"Truncated E-BST (default)", "Quantization Observer (hash-based)"}, 0);
+
+    public FloatOption qoRadiusOption = new FloatOption("qoRadius", 'o',
+        "Quantization radius for the QO observer.", 0.25, 1e-6, Double.MAX_VALUE);
+
+    public FlagOption qoAllowMultiwayOption = new FlagOption("qoAllowMultiway", 'x',
+        "Allow the QO observer to produce numeric multiway splits (requires -q 1).");
+
     public HANode root;
     public int nActiveLeaves;
     public int nInactiveLeaves;
@@ -106,6 +120,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
     public int maxDepth;
     public boolean meritPreprune;
     public boolean removePoorAttrs;
+    public boolean binarySplit;
     public double adwinDelta;
     public double perceptronLR;
 
@@ -141,11 +156,17 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
         maxDepth = maxDepthOption.getValue() < 0 ? Integer.MAX_VALUE : maxDepthOption.getValue();
         meritPreprune = meritPrePruneOption.isSet();
         removePoorAttrs = removePoorAttrsOption.isSet();
+        binarySplit = binarySplitOption.isSet();
         adwinDelta = adwinDeltaOption.getValue();
         perceptronLR = perceptronLROption.getValue();
 
         driftDetectorProto = new ADWINDetector(adwinDelta, 32, 5, 5, 10);
-        numericObserverProto = new HATEBSTObserver(tebstDigitsOption.getValue());
+        if (numericObserverOption.getChosenIndex() == 1) {
+            numericObserverProto = new HAQOObserver(
+                qoRadiusOption.getValue(), qoAllowMultiwayOption.isSet());
+        } else {
+            numericObserverProto = new HATEBSTObserver(tebstDigitsOption.getValue());
+        }
 
         maxByteSize = (long) (maxSizeMBOption.getValue() * 1024 * 1024);
         memoryEstimatePeriod = memoryEstimatePeriodOption.getValue();
@@ -328,10 +349,13 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
 
         // Create the adaptive branch node
         AdaBranchNode branch;
-        if (best.isNumeric) {
+        if (best.isNumericMultiway()) {
+            branch = new AdaNumMultiwayBranch(leaf.stats, best.attIndex, best.qoRadius,
+                best.qoSlotIds, leaf.depth, branchDriftDet, childLeaves);
+        } else if (best.isNumeric) {
             branch = new AdaNumBinaryBranch(leaf.stats, best.attIndex, best.numericThreshold,
                 leaf.depth, childLeaves[0], childLeaves[1], branchDriftDet);
-        } else if (best.isMultiway()) {
+        } else if (best.isNominalMultiway()) {
             branch = new AdaNomMultiwayBranch(leaf.stats, best.attIndex, best.nominalValues,
                 leaf.depth, branchDriftDet, childLeaves);
         } else {
@@ -413,6 +437,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
     private void pruneLeafObservers(HALeafNode leaf, double bestVr, double lastRatio, double lastE) {
         if (leaf.observers == null) return;
         for (HAAttributeObserver obs : leaf.observers.values()) {
+            // Only EBST-based observers support bad-split pruning; QO has no pruning step.
             if (obs instanceof HAEBSTObserver) {
                 ((HAEBSTObserver) obs).pruneBadSplits(leaf.stats, lastRatio, bestVr, lastE, minSamplesSplit);
             }
