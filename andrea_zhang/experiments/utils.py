@@ -218,10 +218,9 @@ def prequential_eval(X, y, framework, cfg, base,
         if scaler:
             scaler.learn_one(x_dict)
 
-        # train
+        # train — riusa arr/xp già calcolati prima dell'aggiornamento dello scaler
         if is_capy:
-            arr2   = scaled_array(scaler, x_dict, nfeat) if scaler else X[i]
-            inst_t = RegressionInstance(schema, (arr2, float(y[i])))
+            inst_t = RegressionInstance(schema, (arr, float(y[i])))
             if time_algo:
                 _ = inst_t.java_instance  # forza conversione numpy->Java prima del timer
                 t0 = perf_counter()
@@ -229,10 +228,9 @@ def prequential_eval(X, y, framework, cfg, base,
             if time_algo:
                 t_train += perf_counter() - t0
         else:
-            xl = scaler.transform_one(x_dict) if scaler else x_dict
             if time_algo:
                 t0 = perf_counter()
-            model.learn_one(xl, float(y[i]))
+            model.learn_one(xp, float(y[i]))
             if time_algo:
                 t_train += perf_counter() - t0
 
@@ -289,6 +287,9 @@ def cum_rmse(yt, yp):
 
 def win_mae(yt, yp, w=500):
     return np.convolve(np.abs(yt - yp), np.ones(w) / w, mode="valid")
+
+def win_rmse(yt, yp, w=500):
+    return np.sqrt(np.convolve((yt - yp) ** 2, np.ones(w) / w, mode="valid"))
 
 def cum_r2(yt, yp):
     r2_arr = np.empty(len(yt))

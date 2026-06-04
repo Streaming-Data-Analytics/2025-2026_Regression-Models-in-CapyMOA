@@ -109,10 +109,7 @@ def run_river(model, X, y, use_scaler=False, feature_names=None):
         cum_mae_vals.append(mae_sum / (i + 1))
         if scaler:
             scaler.learn_one(x)
-            xl = scaler.transform_one(x)
-        else:
-            xl = x
-        model.learn_one(xl, float(y[i]))
+        model.learn_one(xp, float(y[i]))
     return np.array(preds), np.array(cum_mae_vals)
 
 
@@ -135,11 +132,7 @@ def run_capymoa(model, X, y, schema, use_scaler=False, feature_names=None):
         cum_mae_vals.append(mae_sum / (i + 1))
         if scaler:
             scaler.learn_one(x)
-            xs2 = scaler.transform_one(x)
-            arr_learn = np.array([xs2[f] for f in names], dtype=float)
-        else:
-            arr_learn = X[i]
-        model.train(RegressionInstance(schema, (arr_learn, float(y[i]))))
+        model.train(RegressionInstance(schema, (arr_pred, float(y[i]))))
     return np.array(preds), np.array(cum_mae_vals)
 
 
