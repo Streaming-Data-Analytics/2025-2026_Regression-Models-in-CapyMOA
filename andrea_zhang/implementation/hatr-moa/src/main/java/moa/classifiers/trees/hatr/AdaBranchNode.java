@@ -69,10 +69,15 @@ public abstract class AdaBranchNode extends HABranchNode {
                             tree.nActiveLeaves -= this.iterLeaves().size();
                             tree.nActiveLeaves += alternateTree.iterLeaves().size();
                             killChildren(tree);
-                            if (parent != null) parent.children.set(parentBranch, alternateTree);
-                            else tree.root = alternateTree;
-                            tree.nSwitchAlternateTrees++;
-                            return;
+                            if (parent != null) {
+                                parent.children.set(parentBranch, alternateTree);
+                                tree.nSwitchAlternateTrees++;
+                                return; // Non-root: replaced in parent, stop here
+                            } else {
+                                tree.root = alternateTree;
+                                tree.nSwitchAlternateTrees++;
+                                // Root switch: fall through so alternateTree is trained on this sample
+                            }
                         } else {
                             // Current is better: prune alternate
                             killNode(alternateTree, tree);
