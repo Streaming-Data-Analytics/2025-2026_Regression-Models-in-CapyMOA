@@ -192,9 +192,6 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
         List<HALeafNode> leaves;
         if (root instanceof AdaBranchNode) {
             leaves = ((AdaBranchNode) root).traverseWithAlternate(inst);
-        } else if (root instanceof HABranchNode) {
-            HALeafNode leaf = ((HABranchNode) root).traverseToLeaf(inst);
-            leaves = leaf != null ? Collections.singletonList(leaf) : Collections.emptyList();
         } else {
             leaves = Collections.singletonList((HALeafNode) root);
         }
@@ -277,7 +274,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
         SplitCandidate best = candidates.get(candidates.size() - 1);
 
         if (candidates.size() < 2) {
-            shouldSplit = !best.isNullSplit();
+            shouldSplit = true;
         } else {
             SplitCandidate secondBest = candidates.get(candidates.size() - 2);
             double n = leaf.getTotalWeight();
