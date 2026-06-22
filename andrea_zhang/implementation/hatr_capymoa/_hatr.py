@@ -56,8 +56,6 @@ class HoeffdingAdaptiveTreeRegressor(MOARegressor):
         Enable merit-based pre-pruning.
     adwin_delta :
         Delta parameter for per-node ADWIN detectors.
-    learning_ratio :
-        Learning rate for the perceptron leaf model.
     max_size_mb :
         Memory limit in MB (requires SizeOf agent; silently disabled otherwise).
     memory_estimate_period :
@@ -97,7 +95,6 @@ class HoeffdingAdaptiveTreeRegressor(MOARegressor):
         tebst_digits: int = 1,
         merit_preprune: bool = True,
         adwin_delta: float = 0.002,
-        learning_ratio: float = 0.01,
         max_size_mb: float = 500.0,
         memory_estimate_period: int = 1_000_000,
         stop_mem_management: bool = False,
@@ -125,7 +122,6 @@ class HoeffdingAdaptiveTreeRegressor(MOARegressor):
             "tebst_digits": "-z",
             "merit_preprune": "-p",
             "adwin_delta": "-A",
-            "learning_ratio": "-L",
             "max_size_mb": "-M",
             "memory_estimate_period": "-E",
             "stop_mem_management": "-S",

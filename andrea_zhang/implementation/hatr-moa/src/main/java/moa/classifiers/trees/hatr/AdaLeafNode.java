@@ -56,8 +56,7 @@ public abstract class AdaLeafNode extends HALeafNode {
         updateModelSelector(inst, y, tree);
 
         // Update target stats and attribute observers (base leaf logic).
-        updateStats(y, w);
-        if (isActive()) updateObserversFromInst(inst, y, w, tree);
+        baseLearnOne(inst, y, w);
 
         // Train the leaf model (if any) with the bootstrapped weight, before split.
         trainLeafModel(inst, y, w);
@@ -80,21 +79,6 @@ public abstract class AdaLeafNode extends HALeafNode {
 
     /** Hook: train the leaf prediction model with the (bootstrapped) weight. */
     protected void trainLeafModel(Instance inst, double y, double w) { }
-
-    private void updateObserversFromInst(Instance inst, double y, double w, HoeffdingAdaptiveTreeRegressor tree) {
-        int classIdx = inst.classIndex();
-        for (int i = 0; i < inst.numAttributes(); i++) {
-            if (i == classIdx || disabledAtts.contains(i)) continue;
-            if (Double.isNaN(inst.value(i))) continue;
-            HAAttributeObserver obs = observers.get(i);
-            if (obs == null) {
-                boolean nom = inst.attribute(i).isNominal();
-                obs = nom ? new HANominalObserver() : defaultObserver.createNew();
-                observers.put(i, obs);
-            }
-            obs.observe(inst.value(i), y, w);
-        }
-    }
 
     private static int poissonSample(Random rng) {
         double L = Math.exp(-1.0), p = 1.0; int k = 0;
