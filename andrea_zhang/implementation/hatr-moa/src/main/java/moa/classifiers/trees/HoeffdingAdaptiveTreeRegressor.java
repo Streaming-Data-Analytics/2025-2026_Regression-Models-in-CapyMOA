@@ -70,9 +70,6 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
     public FloatOption adwinDeltaOption = new FloatOption("adwinDelta", 'A',
         "ADWIN delta parameter for drift detection.", 0.002, 0.0, 1.0);
 
-    public FloatOption perceptronLROption = new FloatOption("perceptronLR", 'L',
-        "Learning rate for the Perceptron leaf model.", 0.01, 0.0, 1.0);
-
     public FloatOption maxSizeMBOption = new FloatOption("maxSizeMB", 'M',
         "Maximum memory consumed by the tree (MB). Requires SizeOf agent; silently disabled otherwise.",
         500.0, 0.0, Float.MAX_VALUE);
@@ -107,8 +104,6 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
     public boolean meritPreprune;
     public boolean removePoorAttrs;
     public double adwinDelta;
-    public double perceptronLR;
-
     public ADWINDetector driftDetectorProto;
 
     public HAAttributeObserver numericObserverProto;
@@ -142,8 +137,6 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
         meritPreprune = meritPrePruneOption.isSet();
         removePoorAttrs = removePoorAttrsOption.isSet();
         adwinDelta = adwinDeltaOption.getValue();
-        perceptronLR = perceptronLROption.getValue();
-
         driftDetectorProto = new ADWINDetector(adwinDelta, 32, 5, 5, 10);
         numericObserverProto = new HATEBSTObserver(tebstDigitsOption.getValue());
 
@@ -192,9 +185,6 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
         List<HALeafNode> leaves;
         if (root instanceof AdaBranchNode) {
             leaves = ((AdaBranchNode) root).traverseWithAlternate(inst);
-        } else if (root instanceof HABranchNode) {
-            HALeafNode leaf = ((HABranchNode) root).traverseToLeaf(inst);
-            leaves = leaf != null ? Collections.singletonList(leaf) : Collections.emptyList();
         } else {
             leaves = Collections.singletonList((HALeafNode) root);
         }
@@ -244,7 +234,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
             } else if (parent instanceof AdaLeafAdaptive) {
                 model = ((AdaLeafAdaptive) parent).model.copy();
             } else {
-                model = new HAPerceptron(64, perceptronLR, perceptronLR, 0.0);
+                model = new HAPerceptron(64, 0.01, 0.01, 0.0);
             }
         }
 
@@ -277,7 +267,7 @@ public class HoeffdingAdaptiveTreeRegressor extends AbstractClassifier {
         SplitCandidate best = candidates.get(candidates.size() - 1);
 
         if (candidates.size() < 2) {
-            shouldSplit = !best.isNullSplit();
+            shouldSplit = true;
         } else {
             SplitCandidate secondBest = candidates.get(candidates.size() - 2);
             double n = leaf.getTotalWeight();

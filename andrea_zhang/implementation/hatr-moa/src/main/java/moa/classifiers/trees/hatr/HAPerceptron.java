@@ -31,14 +31,14 @@ public class HAPerceptron {
     }
 
     public double predict(Instance inst) {
-        double pred = intercept;
+        double pred = 0.0;
         int nAtt = inst.numAttributes() - 1;
         for (int i = 0; i < nAtt; i++) {
             if (i < weights.length && !inst.attribute(i).isNominal() && !Double.isNaN(inst.value(i))) {
                 pred += weights[i] * inst.value(i);
             }
         }
-        return pred;
+        return pred + intercept;
     }
 
     public void train(Instance inst, double y, double w) {

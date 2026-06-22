@@ -36,15 +36,13 @@ public abstract class HALeafNode implements HANode {
     public abstract double getPrediction(Instance inst);
     public abstract int calculatePromise();
 
-    /** Base learning: update stats and attribute observers. */
-    public void baseLearnOne(Instance inst, HoeffdingAdaptiveTreeRegressor tree) {
-        double y = inst.classValue();
-        double w = inst.weight();
+    /** Common leaf learning: update stats and attribute observers with the effective sample weight. */
+    protected void baseLearnOne(Instance inst, double y, double w) {
         updateStats(y, w);
-        if (isActive()) updateObservers(inst, y, w, tree);
+        if (isActive()) updateObservers(inst, y, w);
     }
 
-    private void updateObservers(Instance inst, double y, double w, HoeffdingAdaptiveTreeRegressor tree) {
+    private void updateObservers(Instance inst, double y, double w) {
         int classIdx = inst.classIndex();
         for (int i = 0; i < inst.numAttributes(); i++) {
             if (i == classIdx || disabledAtts.contains(i)) continue;

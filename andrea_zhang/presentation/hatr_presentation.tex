@@ -1,0 +1,1182 @@
+\documentclass[aspectratio=169,10pt]{beamer}
+
+% Theme
+\usetheme{Madrid}
+\usecolortheme{whale}
+\usefonttheme{structurebold}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{footline}[frame number]
+
+% Packages
+\usepackage[italian]{babel}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric,arrows.meta,positioning,fit,backgrounds}
+\usepackage{pgfplots}
+\pgfplotsset{compat=newest}
+\usepackage{graphicx}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{colortbl}
+
+% Colours
+\definecolor{riverblue}{RGB}{31,119,180}
+\definecolor{capyorange}{RGB}{214,118,27}
+\definecolor{driftred}{RGB}{180,40,40}
+\definecolor{adwingreen}{RGB}{44,160,44}
+\definecolor{codebg}{RGB}{245,245,245}
+\definecolor{javakw}{RGB}{0,0,200}
+\definecolor{javastr}{RGB}{163,21,21}
+\definecolor{javacomm}{RGB}{0,128,0}
+\definecolor{pythonkw}{RGB}{0,0,200}
+
+% Code style
+\lstdefinestyle{java}{
+  language=Java,
+  basicstyle=\ttfamily\fontsize{6.5}{8}\selectfont,
+  backgroundcolor=\color{codebg},
+  keywordstyle=\color{javakw}\bfseries,
+  stringstyle=\color{javastr},
+  commentstyle=\color{javacomm}\itshape,
+  frame=single,framerule=0.4pt,
+  breaklines=true,
+  tabsize=2,
+  showstringspaces=false,
+  xleftmargin=4pt, xrightmargin=4pt,
+  numbers=none,
+}
+\lstdefinestyle{python}{
+  language=Python,
+  basicstyle=\ttfamily\fontsize{6.5}{8}\selectfont,
+  backgroundcolor=\color{codebg},
+  keywordstyle=\color{pythonkw}\bfseries,
+  stringstyle=\color{javastr},
+  commentstyle=\color{javacomm}\itshape,
+  frame=single,framerule=0.4pt,
+  breaklines=true,
+  tabsize=2,
+  showstringspaces=false,
+  xleftmargin=4pt, xrightmargin=4pt,
+  numbers=none,
+}
+
+% Macros
+\newcommand{\hatr}{\textsc{hatr}}
+\newcommand{\river}{\textcolor{riverblue}{\textbf{River}}}
+\newcommand{\capymoa}{\textcolor{capyorange}{\textbf{CapyMOA}}}
+\newcommand{\adwin}{\textsc{adwin}}
+\newcommand{\fimtdd}{\textsc{fimtdd}}
+\newcommand{\arf}{\textsc{arf}}
+\newcommand{\eps}{\varepsilon}
+
+% Title
+\title[\hatr{} — Porting e Validazione]{%
+  Hoeffding Adaptive Tree Regressor\\
+  Teoria, Implementazione in MOA/CapyMOA e Validazione Sperimentale}
+\subtitle{Stream Data Analytics 2025--2026}
+\author[Andrea Zhang]{Andrea Zhang}
+\institute[Polimi]{Politecnico di Milano}
+\date{2026}
+
+\begin{document}
+
+\begin{frame}
+  \titlepage
+\end{frame}
+
+\begin{frame}{Indice}
+  \tableofcontents[hideallsubsections]
+\end{frame}
+
+% ============================================================
+\section{Motivazione}
+% ============================================================
+
+\begin{frame}{Perché portare \hatr{} in CapyMOA?}
+  \begin{columns}[T]
+    \column{0.45\linewidth}
+    \begin{alertblock}{Il gap}
+      \small
+      \river{} offre un'implementazione di riferimento di \hatr{},
+      ma MOA/CapyMOA non dispone di un learner nativo equivalente.
+
+      \smallskip
+      Il confronto richiede quindi di cambiare framework, evaluator
+      e pipeline sperimentale.
+    \end{alertblock}
+
+    \vspace{-2pt}
+    \begin{center}
+      \Large\textcolor{riverblue}{$\Downarrow$}
+    \end{center}
+    \vspace{-6pt}
+
+    \begin{block}{Il contributo}
+      \small
+      Un port Java nativo con:
+      \begin{itemize}
+        \item wrapper Python compatibile con CapyMOA;
+        \item validazione rispetto a River su 8 dataset;
+        \item integrazione nel ciclo di vita MOA.
+      \end{itemize}
+    \end{block}
+
+    \column{0.51\linewidth}
+    \begin{block}{Prestazioni osservate}
+      \small
+      \begin{itemize}
+        \item \textbf{Training}: circa 3--8$\times$ più veloce nel benchmark;
+        \item \textbf{Memoria}: modello generalmente più compatto.
+      \end{itemize}
+    \end{block}
+
+    \begin{block}{Integrazione nel framework}
+      \small
+      \begin{itemize}
+        \item \textbf{Schema ARFF}: feature nominali riconosciute
+              automaticamente;
+        \item \textbf{Ecosistema MOA}: stessi stream, evaluator e learner
+              di confronto.
+      \end{itemize}
+    \end{block}
+
+    \vspace{1pt}
+    {\scriptsize\textcolor{gray}{Il vantaggio riguarda soprattutto il training;
+    nell'inferenza per singola istanza può pesare l'overhead Python--JVM.}}
+  \end{columns}
+\end{frame}
+
+% ============================================================
+\section{Background Teorico}
+% ============================================================
+
+\begin{frame}{Hoeffding Tree: base per lo streaming}
+  \begin{columns}[T]
+    \column{0.55\linewidth}
+    \textbf{Hoeffding Tree (VFDT)} \cite{Domingos2000} è un albero decisionale
+    online che costruisce split usando la \alert{Hoeffding bound}:
+    \[
+      \varepsilon(n, \delta) = \sqrt{\frac{\ln(1/\delta)}{2n}}
+    \]
+    \medskip
+    \textbf{Regola di split}: dati i due migliori attributi $a_1, a_2$
+    (per variance reduction):
+    \[
+      \text{split se}\quad
+      \frac{\Delta\bar{G}(a_2)}{\Delta\bar{G}(a_1)} < 1 - \varepsilon
+      \quad\text{oppure}\quad \varepsilon < \tau
+    \]
+    \medskip
+    \textbf{Grace period} $g$: si tenta lo split ogni $g$ istanze per
+    ammortizzare il costo.
+
+    \column{0.42\linewidth}
+    \begin{block}{Split criterion — Variance Reduction}
+      \vspace{2pt}
+      \[
+        \Delta\bar{G}(a) = \mathrm{Var}(S) - \sum_{v} \frac{|S_v|}{|S|} \mathrm{Var}(S_v)
+      \]
+      \vspace{-4pt}
+      \begin{itemize}\small
+        \item $S$ = istanze nel nodo
+        \item $S_v$ = sottoinsieme che va al ramo $v$
+        \item $\mathrm{Var}$ = varianza campionaria (\emph{ddof}=1, Welford)
+      \end{itemize}
+    \end{block}
+    \begin{alertblock}{Limitazione}
+      Un Hoeffding Tree standard non rileva i \textbf{concept drift}:
+      una volta creato, un nodo non viene revisionato.
+    \end{alertblock}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{ADWIN: finestra adattiva per il drift}
+  \begin{columns}[T]
+    \column{0.52\linewidth}
+    \textbf{ADWIN} (ADaptive WINdowing) \cite{Bifet2007} mantiene una
+    \alert{finestra di dimensione variabile} sullo stream di errori.
+
+    \medskip
+    \textbf{Idea}: si cerca il taglio $W = W_0 \cup W_1$ che massimizza
+    la differenza di medie; se questa supera la soglia, la parte vecchia viene
+    eliminata.
+
+    \medskip
+    \textbf{Criterio di taglio} (Babcock et al., 2003 — variance-aware):
+    \[
+      |\hat{\mu}_{W_0} - \hat{\mu}_{W_1}| > \varepsilon_{cut}
+    \]
+    \[
+      \varepsilon_{cut} = \sqrt{2\,m^{-1}\,\hat{\sigma}^2_W\,\delta'}
+                        + \frac{2}{3}\,m^{-1}\,\delta'
+    \]
+    \[
+      m^{-1} = \frac{1}{n_0-n_{\min}+1}
+             + \frac{1}{n_1-n_{\min}+1}
+    \]
+    dove $n_0=|W_0|$, $n_1=|W_1|$,
+    $n_{\min}=\texttt{minWindowLength}$ e
+    $\delta' = \ln\!\bigl(2\ln(|W|)/\delta\bigr)$.
+
+    \column{0.45\linewidth}
+    \begin{block}{Struttura a bucket}
+\centering
+\begin{tikzpicture}[scale=0.95]
+
+\tikzset{
+  bucket/.style={
+    rectangle,
+    draw,
+    minimum width=0.75cm,
+    minimum height=0.45cm,
+    fill=blue!10,
+    font=\scriptsize
+  }
+}
+
+% Row 0
+\node[left,font=\scriptsize] at (-0.8,1.6) {row 0};
+\node[bucket] (b0a) at (0,1.6) {$2^0$};
+\node[bucket] (b0b) at (0.9,1.6) {$2^0$};
+\node[bucket] (b0c) at (1.8,1.6) {$2^0$};
+
+% Row 1
+\node[left,font=\scriptsize] at (-0.8,0.8) {row 1};
+\node[bucket] (b1a) at (0,0.8) {$2^1$};
+\node[bucket] (b1b) at (0.9,0.8) {$2^1$};
+
+% Row 2
+\node[left,font=\scriptsize] at (-0.8,0.0) {row 2};
+\node[bucket] (b2a) at (0,0.0) {$2^2$};
+
+% Compress arrow
+\draw[->,thick,driftred]
+  (2.8,1.6) -- (2.8,0.8)
+  node[midway,right,font=\scriptsize]{compress};
+
+% Direction label
+\node[font=\small,text=driftred]
+  at (1.0,-0.8)
+  {$\leftarrow$ newest \qquad oldest $\rightarrow$};
+
+\end{tikzpicture}
+
+\vspace{2mm}
+
+Ogni riga $i$ contiene bucket di dimensione $2^i$; quando una riga è
+piena, il \emph{compress} fonde i due bucket più vecchi nella riga
+successiva.
+
+\end{block}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Meccanismo adattivo di \hatr{}}
+  \begin{columns}[T]
+    \column{0.48\linewidth}
+    Ogni nodo monitora l'errore con \adwin{}. Un \textbf{nodo interno}
+    può inoltre ospitare:
+    \begin{enumerate}
+      \item lo storico dell'errore $|y - \hat{y}|$
+      \item un \textbf{albero alternativo} opzionale, inizialmente assente
+    \end{enumerate}
+
+    \medskip
+    \textbf{Ciclo di vita} a ogni istanza $(\mathbf{x}, y)$:
+    \begin{itemize}
+      \item Predici dal nodo corrente; calcola errore
+      \item Aggiorna \adwin{}
+      \item \alert{Se drift rilevato} e l'errore \emph{sta aumentando}:
+            crea albero alternativo (foglia) alla stessa profondità
+      \item \alert{Se entrambi i path sono maturi}
+            ($n_a,n_c > w_{\min}$): esegui \textbf{z-test}
+      \item Se z-test significativo: \emph{swap} o \emph{pruning}
+    \end{itemize}
+
+    \column{0.49\linewidth}
+    \begin{alertblock}{Z-test per lo swap}
+      \vspace{2pt}
+      Confronta l'errore medio del path corrente ($\mu_c, \sigma_c^2$)
+      con quello dell'alternativo ($\mu_a, \sigma_a^2$):
+      \[
+        z = \frac{\mu_a - \mu_c}{\sqrt{\sigma_a^2/n_a + \sigma_c^2/n_c}}
+      \]
+      \[
+        p = 2\,\Phi(-|z|)
+      \]
+      \begin{itemize}\small
+        \item $p \le \alpha$ e $\mu_a < \mu_c$: \textbf{swap} (alternativo è migliore)
+        \item $p \le \alpha$ e $\mu_a \ge \mu_c$: \textbf{pruning} (corrente è migliore)
+      \end{itemize}
+    \end{alertblock}
+
+    \vspace{2pt}
+    \textbf{Predizione}: finché esistono alternative, media le predizioni
+    delle foglie raggiunte lungo tutti i path attivi.
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Modalità di foglia}
+  \hatr{} supporta tre strategie di predizione alle foglie:
+
+  \bigskip
+  \begin{columns}[T]
+    \column{0.3\linewidth}
+    \begin{block}{\textbf{MEAN}}
+      Predice con la \alert{media target} accumulata nella foglia
+      (aggiornamento incrementale).
+      \[
+        \hat{y} = \bar{y}_{\text{leaf}}
+      \]
+      \vspace{2pt}\\
+      \textit{Semplice, robusto, deterministico.}
+    \end{block}
+
+    \column{0.33\linewidth}
+    \begin{block}{\textbf{MODEL}}
+      Predice con un \alert{modello lineare online} (\emph{Perceptron},
+      gradiente su perdita quadratica):
+      \[
+        \hat{y} = \mathbf{w}^{\!\top}\!\mathbf{x} + b
+      \]
+      \[
+        \nabla = 2(\hat{y}-y)\,[\mathbf{x};\,1]
+      \]
+      \vspace{2pt}\\
+      I figli ereditano una \textbf{copia} del modello del padre.
+    \end{block}
+
+    \column{0.33\linewidth}
+    \begin{block}{\textbf{ADAPTIVE} (default)}
+      Sceglie dinamicamente tra \textsc{mean} e \textsc{model} tramite
+      \alert{faded MSE} (EWMA):
+      \[
+        e_{\text{mean}} \leftarrow \gamma\,e_{\text{mean}} + (y-\bar{y})^2
+      \]
+      \[
+        e_{\text{model}} \leftarrow \gamma\,e_{\text{model}} + (y-\hat{y}_m)^2
+      \]
+      Usa \textsc{mean} se $e_{\text{mean}} < e_{\text{model}}$.
+    \end{block}
+  \end{columns}
+
+  \bigskip
+  \begin{center}
+    \small
+    Bootstrap sampling opzionale (Poisson($\lambda=1$)) in tutte le
+    modalità per aumentare la diversità delle foglie.
+  \end{center}
+\end{frame}
+
+% ============================================================
+\section{Scelte di Design e Risultati}
+% ============================================================
+
+\begin{frame}[shrink=15]{Scelte di design: configurazione implementata}
+  \begin{columns}[T]
+    \column{0.50\linewidth}
+    \begin{block}{Cosa è stato implementato}
+      \small
+      \textbf{Solo la configurazione default di River}:
+      \begin{itemize}
+        \item Splitter: \texttt{HATEBSTObserver} (Truncated E-BST)\\
+              {\footnotesize split binari per attributi numerici}
+        \item Drift detector: \texttt{ADWINDetector}
+        \item Leaf model: \texttt{HAPerceptron} (SGD lineare)
+        \item \texttt{binary\_split=False} hardcoded\\
+              {\footnotesize attributi nominali $\to$ multiway branch}
+      \end{itemize}
+      \smallskip
+      Le principali opzioni algoritmiche sono configurabili
+      dal wrapper Python e tradotte in flag MOA.
+    \end{block}
+
+    \medskip
+    \begin{block}{Motivazione}
+      \small
+      Il port replica la configurazione standard di \river{}.
+      Senza bootstrap produce le stesse predizioni; con bootstrap
+      i diversi generatori casuali rendono confrontabili le metriche,
+      non le singole predizioni.
+    \end{block}
+
+    \column{0.47\linewidth}
+    \begin{alertblock}{Cosa non è stato implementato}
+      \small
+      \begin{itemize}
+        \item \textbf{\texttt{binary\_split=True}}\\
+              {\footnotesize split nominale binario forzato
+              (non-default in River)}
+        \item \textbf{\texttt{QOSplitter}}\\
+              {\footnotesize richiederebbe
+              \texttt{AdaNumMultiwayBranch} per attributi numerici}
+        \item \textbf{Componenti pluggabili}\\
+              {\footnotesize splitter, drift detector e leaf model
+              sono fissi al default River}
+      \end{itemize}
+    \end{alertblock}
+
+    \medskip
+    \begin{tabular}{@{}ll@{\;}c@{}}
+      \toprule
+      \textbf{Stato} & \textbf{Esempio} & \\
+      \midrule
+      Configurabile & \texttt{grace\_period}, \texttt{delta} & \textcolor{adwingreen}{$\checkmark$} \\
+      Hardcoded default & \texttt{splitter}, \texttt{ADWIN} & \textcolor{capyorange}{$\sim$} \\
+      Non implementato & \texttt{binary\_split=True} & \textcolor{driftred}{$\times$} \\
+      \bottomrule
+    \end{tabular}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Setup sperimentale}
+  \begin{columns}[T]
+    \column{0.48\linewidth}
+    \textbf{Dataset} ($n=17\,000$, prequential evaluation):
+    \smallskip
+    \footnotesize
+    \begin{tabular}{@{}lcc@{}}
+      \toprule
+      Dataset & Feat. & Drift \\
+      \midrule
+      Synthetic    & 5  & abrupt \\
+      Bike Sharing & 12 & naturale \\
+      Fried        & 10 & nessuno \\
+      Hyper (lento)& 10 & graduale \\
+      HyperFast    & 10 & rapido \\
+      FriedDrift   & 10 & abrupt \\
+      RBFReg       & 10 & graduale \\
+      ElecDemand   & 7  & naturale \\
+      \bottomrule
+    \end{tabular}
+
+    \smallskip
+    {\footnotesize\textcolor{gray}{Cap a 17\,000 ist.
+    Bike/ElecDemand: reali. Hyper/HyperFast: generatore.}}
+
+    \smallskip
+    \footnotesize\textbf{Configurazioni}:
+    \begin{itemize}
+      \item \textit{Deterministic}: \texttt{mean}, no bootstrap
+      \item \textit{Default}: \texttt{adaptive}, bootstrap=True
+    \end{itemize}
+
+    \column{0.49\linewidth}
+    \vspace{-2pt}
+    \textbf{Iperparametri comuni}:
+    \begin{itemize}\small
+      \item \texttt{grace\_period=50}, $\delta=10^{-7}$, $\tau=0.05$
+      \item \texttt{adwin\_delta=0.002}, \texttt{switch\_significance=0.05}
+      \item \texttt{drift\_window\_threshold=300}
+      \item \texttt{model\_selector\_decay=0.95}
+      \item Leaf model: $lr_w=lr_b=0.01$, $L2=0$ (default fisso); seed=0
+      \item StandardScaler online identico ai due lati
+    \end{itemize}
+
+    \vspace{4pt}
+    \begin{alertblock}{Due domande diverse}
+      \small
+      La configurazione deterministica misura la \textbf{fedeltà del port};
+      quella default misura la \textbf{qualità d'uso reale}.
+    \end{alertblock}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Quattro risultati da verificare nei notebook}
+  \footnotesize
+  \begin{tabular}{@{}p{0.28\linewidth}p{0.30\linewidth}p{0.36\linewidth}@{}}
+    \toprule
+    \textbf{Domanda} & \textbf{Esperimento} & \textbf{Risultato} \\
+    \midrule
+    Il port replica River? &
+      MEAN/MODEL/ADAPTIVE senza bootstrap &
+      Predizioni e struttura coincidono numericamente \\
+    \addlinespace
+    Il default mantiene la qualità? &
+      ADAPTIVE con bootstrap &
+      MAE e RMSE restano comparabili; le predizioni divergono per la RNG \\
+    \addlinespace
+    Il training è più rapido? &
+      8 dataset, cap a 17\,000 istanze &
+      Speedup complessivo osservato: circa 2.95--7.85$\times$ \\
+    \addlinespace
+    Il modello è più compatto? &
+      Stima finale del modello &
+      Riduzione osservata: circa 2.2--11.9$\times$\textsuperscript{*} \\
+    \bottomrule
+  \end{tabular}
+
+  \medskip
+  {\footnotesize\textsuperscript{*}\,Confronto indicativo: gli strumenti
+  misurano heap Python e oggetti JVM con metodologie differenti.}
+
+  \medskip
+  \begin{alertblock}{Demo}
+    \footnotesize
+    I notebook mostrano dati, configurazioni, metriche e curve complete;
+    questa tabella è la mappa con cui leggere la dimostrazione.
+  \end{alertblock}
+\end{frame}
+
+% ============================================================
+\section{Dettagli Implementativi}
+% ============================================================
+
+\begin{frame}[fragile]{Struttura Java: gerarchia dei nodi}
+  \centering
+    \begin{tikzpicture}[
+      cls/.style={rectangle,draw,fill=blue!8,font=\tiny\ttfamily,
+                  text width=2.5cm,minimum height=0.5cm,align=center},
+      abs/.style={cls,fill=gray!12,font=\tiny\ttfamily\itshape},
+      arr/.style={-{Triangle[open,length=5pt,width=7pt]},thick}]
+      \node[abs] (hanode) {HANode (interface)};
+      \node[abs] (haleaf)   [below left=0.5cm and 0.3cm of hanode]  {HALeafNode (abstract)};
+      \node[abs] (habranch) [below right=0.5cm and 0.1cm of hanode] {HABranchNode (abstract)};
+      \node[abs] (adaleaf)  [below=0.5cm of haleaf]   {AdaLeafNode (abstract)};
+      \node[abs] (adabranch)[below=0.5cm of habranch] {AdaBranchNode (abstract)};
+      \node[cls] (alm)  [below left=0.5cm and -0.2cm of adaleaf]  {AdaLeafMean};
+      \node[cls] (almo) [below=0.45cm of adaleaf]                  {AdaLeafModel};
+      \node[cls] (alad) [below right=0.5cm and -0.15cm of adaleaf] {AdaLeafAdaptive};
+      \node[cls,text width=1.8cm] (anb)
+            [below=1.3cm of adabranch, xshift=-2.0cm] {AdaNum\\BinaryBranch};
+      \node[cls,text width=1.8cm] (anombb)
+            [below=1.3cm of adabranch]                {AdaNom\\BinaryBranch};
+      \node[cls,text width=1.8cm] (anomm)
+            [below=1.3cm of adabranch, xshift=2.0cm]  {AdaNom\\MultiwayBranch};
+      \draw[arr] (haleaf) -- (hanode);
+      \draw[arr] (habranch) -- (hanode);
+      \draw[arr] (adaleaf) -- (haleaf);
+      \draw[arr] (adabranch) -- (habranch);
+      \draw[arr] (alm) -- (adaleaf);
+      \draw[arr] (almo) -- (adaleaf);
+      \draw[arr] (alad) -- (adaleaf);
+      \draw[arr] (anb) -- (adabranch);
+      \draw[arr] (anombb) -- (adabranch);
+      \draw[arr] (anomm) -- (adabranch);
+    \end{tikzpicture}
+
+  \medskip
+  \small
+  \textbf{Separazione delle responsabilità:}
+  le foglie apprendono e propongono split; i branch instradano le istanze
+  e gestiscono gli alberi alternativi.
+\end{frame}
+
+\begin{frame}[fragile,shrink=6]{Codice: apprendimento in una foglia adattiva}
+  \begin{columns}[T]
+    \column{0.64\linewidth}
+\begin{lstlisting}[style=java,basicstyle=\ttfamily\fontsize{7.1}{8.4}\selectfont]
+double y = inst.classValue();
+double w = inst.weight();
+double yPred = getPrediction(inst);       // pre-update
+
+if (tree.bootstrapSampling) {
+  int k = poissonSample(rng);             // Poisson(1)
+  if (k > 0) w *= k;
+}
+
+double err = Math.abs(y - yPred);
+driftDetector.update(err);                // local ADWIN
+errorTracker.update(err, 1.0);
+
+updateModelSelector(inst, y, tree);       // faded MSE
+baseLearnOne(inst, y, w);                 // stats + observer
+trainLeafModel(inst, y, w);               // SGD model
+
+double seen = getTotalWeight();
+if (seen - lastSplitAttemptAt >= tree.gracePeriod
+    && isActive() && tree.growthAllowed) {
+  tree.attemptToSplit(this, parent, parentBranch,
+                      tree.driftDetectorProto.createNew());
+  lastSplitAttemptAt = seen;
+}
+\end{lstlisting}
+
+    \column{0.33\linewidth}
+    \begin{alertblock}{Perché l'ordine conta}
+      \small
+      Predizione, errore e selezione del modello usano lo stato
+      \textbf{prima} dell'aggiornamento: così non valutano il target
+      appena osservato con un modello che lo ha già appreso.
+    \end{alertblock}
+
+    \medskip
+    \begin{block}{Grace period}
+      \small
+      Gli observer vengono aggiornati a ogni istanza, ma la ricerca
+      dello split parte soltanto ogni $g$ unità di peso osservato.
+    \end{block}
+  \end{columns}
+\end{frame}
+
+\begin{frame}[fragile,shrink=5]{Codice: dalla Hoeffding bound al nuovo branch}
+  \begin{columns}[T]
+    \column{0.59\linewidth}
+\begin{lstlisting}[style=java,basicstyle=\ttfamily\fontsize{7.1}{8.4}\selectfont]
+Collections.sort(candidates);
+SplitCandidate best = candidates.get(size - 1);
+SplitCandidate second = candidates.get(size - 2);
+
+double n = leaf.getTotalWeight();
+double eps = Math.sqrt(
+    Math.log(1.0 / delta) / (2.0 * n));
+
+boolean shouldSplit = best.merit > 0.0 && (
+    second.merit / best.merit < 1.0 - eps
+    || eps < tau);
+
+if (best.isNullSplit()) {
+  leaf.deactivate();                       // pre-pruning
+  return;
+}
+
+if (best.isNumeric)
+  branch = new AdaNumBinaryBranch(...);
+else if (best.isMultiway())
+  branch = new AdaNomMultiwayBranch(...);
+else
+  branch = new AdaNomBinaryBranch(...);
+\end{lstlisting}
+
+    \column{0.37\linewidth}
+    \begin{block}{Due condizioni di split}
+      \small
+      \begin{itemize}
+        \item il rapporto tra secondo e primo candidato è abbastanza piccolo;
+        \item oppure $\varepsilon < \tau$, per rompere una situazione di parità.
+      \end{itemize}
+    \end{block}
+
+    \begin{alertblock}{Lo stesso risultato, tre strutture}
+      \small
+      Il tipo di \texttt{SplitCandidate} determina quale branch adattivo
+      sostituisce la foglia, mantenendo statistiche e profondità.
+    \end{alertblock}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Tipi di branch (split)}
+
+\vspace{-0.5em}
+
+\begin{block}{Tipi di branch (split)}
+  \begin{itemize}\small
+    \item \textbf{AdaNumBinaryBranch}\\
+          \footnotesize split numerico: $x_i \le t$;
+          soglia da E-BST / TE-BST
+    \medskip
+
+    \item \textbf{AdaNomBinaryBranch}\\
+          \footnotesize split nominale binario:
+          $x_i = v$ vs.\ tutto il resto
+    \medskip
+
+    \item \textbf{AdaNomMultiwayBranch}\\
+          \footnotesize un ramo per valore categorico;
+          valore non visto $\to$ nuovo figlio dedicato
+          (come River \texttt{add\_child});
+          \texttt{maxBranches() = -1}
+  \end{itemize}
+\end{block}
+
+\vspace{-0.8em}
+
+\medskip
+\begin{alertblock}{Perché non \texttt{AdaNumMultiwayBranch}?}
+  \footnotesize
+  In River esiste \texttt{AdaNumMultiwayBranchReg}, ma viene usata
+  \emph{solo} con \texttt{QOSplitter(allow\_multiway\_splits=True)},
+  configurazione non-default. Il default splitter (\texttt{TEBSTSplitter})
+  produce sempre split binari per attributi numerici
+  $\Rightarrow$ \texttt{AdaNumBinaryBranch} è sufficiente per
+  l'equivalenza con River HATR standard.
+\end{alertblock}
+
+\vspace{-0.8em}
+
+\medskip
+\begin{alertblock}{\texttt{binary\_split} non implementato come opzione}
+  \footnotesize
+  River espone \texttt{binary\_split=False} (default): per attributi
+  nominali il multiway viene preferito; il binario lo sostituisce solo
+  se ha merit strettamente superiore.
+  Il Java replica questo comportamento in modo fisso in
+  \texttt{HANominalObserver}: \texttt{binary\_split=True} non è
+  supportato.
+\end{alertblock}
+
+\end{frame}
+
+\begin{frame}{Componenti di supporto}
+
+\begin{block}{Observer per attributi numerici}
+\begin{itemize}\small
+  \item \texttt{HAEBSTObserver} — E-BST standard
+
+  \item \texttt{HATEBSTObserver} — \textbf{Truncated} E-BST con arrotondamento
+        \emph{half-even} (\texttt{BigDecimal.HALF\_EVEN}) per replicare
+        \texttt{round(x, digits)} di Python
+\end{itemize}
+\end{block}
+
+\vspace{0.2cm}
+
+\begin{block}{Utilities auto-contenute}
+\begin{itemize}\small
+  \item \texttt{VarStats} — varianza incrementale Welford (port di
+        \texttt{river.stats.Var})
+
+  \item \texttt{ADWINDetector} — port fedele da River Cython
+
+  \item \texttt{HAPerceptron} — modello lineare SGD
+
+  \item \texttt{NormalDist} — CDF via Apache Commons Math 3
+        (\texttt{Erf.erfc})
+\end{itemize}
+\end{block}
+
+\vspace{0.2cm}
+
+\end{frame}
+
+\begin{frame}{Dettagli implementativi non ovvi}
+  \begin{block}{Truncated EBST e arrotondamento}
+    \small
+    Il TEBST arrotonda i valori di split a un numero fisso di cifre
+    decimali, riducendo i candidati unici nell'albero.
+    Python \texttt{round()} usa banker's rounding (half-even);
+    \texttt{Math.round()} in Java usa half-up.
+    La discrepanza rompeva l'equivalenza: risolto usando
+    \texttt{BigDecimal(x).setScale(d, HALF\_EVEN)}.
+  \end{block}
+
+  \medskip
+
+  \begin{block}{Predizione con albero alternativo attivo}
+    \small
+    \texttt{traverseWithAlternate} non viene chiamato solo al momento
+    dello swap: durante \emph{tutta la vita} dell'albero alternativo,
+    la predizione è la media tra il path principale e quello alternativo.
+  \end{block}
+\end{frame}
+
+\begin{frame}{Attributi nominali: River vs.\ MOA}
+  \begin{block}{River — schema-less}
+    \small
+    Le feature arrivano come dizionari Python senza tipo dichiarato.
+    \texttt{nominal\_attributes} (lista di nomi) è l'unico modo per
+    indicare al tree quali feature trattare come categoriche; senza,
+    verrebbero passate al \texttt{TEBSTSplitter} numerico.
+  \end{block}
+
+  \medskip
+
+  \begin{block}{MOA — schema ARFF}
+    \small
+    Ogni dataset porta uno schema che dichiara il tipo di ogni attributo.
+    \texttt{inst.attribute(i).isNominal()} funziona in automatico:
+    nessuna configurazione richiesta all'utente.
+  \end{block}
+\end{frame}
+
+\begin{frame}{\texttt{merit\_preprune}: un caso limite utile}
+
+  \begin{block}{Meccanismo}
+    \small
+    Con \texttt{merit\_preprune=True} il candidato \emph{null split}
+    (merit~$= -\infty$) viene aggiunto alla lista.
+    Se vince il test di Hoeffding la foglia viene \textbf{disattivata}.
+
+    \smallskip
+    Il null split viene selezionato solo se \texttt{len(candidates)~<~2}
+    (unico candidato). Con \texttt{len~$\ge$~2}, il controllo
+    \texttt{best.merit~>~0} fallisce prima ancora di raggiungere
+    la selezione del candidato — il null non viene mai scelto.
+  \end{block}
+
+  \medskip
+  \begin{alertblock}{Quando cambia davvero il comportamento}
+    \small
+    Con feature continue il null split non può diventare il migliore e
+    l'opzione è normalmente ininfluente. Con una feature nominale ad alta
+    cardinalità, invece, i branch possono avere merit zero:
+    \begin{itemize}
+      \item senza pre-pruning: split forzato anche senza segnale;
+      \item con pre-pruning: il null split disattiva la foglia ed evita
+            lo split spurio.
+    \end{itemize}
+    \textbf{Test mirato:} 60 foglie senza pre-pruning, 1 foglia con pre-pruning;
+    River e CapyMOA coincidono a ogni campione.
+  \end{alertblock}
+\end{frame}
+
+\begin{frame}{La classe principale orchestra quattro responsabilità}
+  \begin{columns}[T]
+    \column{0.48\linewidth}
+    \begin{block}{Configurazione}
+      \small
+      Traduce le opzioni MOA in parametri operativi e crea i prototipi
+      di observer e drift detector.
+    \end{block}
+
+    \begin{block}{Training}
+      \small
+      Inizializza la radice e delega ogni istanza a
+      \texttt{AdaLeafNode} oppure \texttt{AdaBranchNode}.
+    \end{block}
+
+    \column{0.48\linewidth}
+    \begin{block}{Predizione}
+      \small
+      Raccoglie le foglie raggiunte nel path principale e negli alberi
+      alternativi, quindi ne media le predizioni.
+    \end{block}
+
+    \begin{alertblock}{Crescita e memoria}
+      \small
+      Decide quando creare uno split, aggiorna i contatori e applica
+      periodicamente il limite di memoria.
+    \end{alertblock}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Memory management}
+  \begin{columns}[T]
+    \column{0.48\linewidth}
+    Ogni $10^6$ istanze (configurabile), la classe principale esegue un
+    ciclo di stima e controllo della memoria:
+
+    \medskip
+    \begin{enumerate}
+      \item \textbf{Stima} (\texttt{estimateModelByteSizes}):
+            misura la RAM reale via \texttt{SizeOf} e aggiorna le stime
+            per foglia attiva e inattiva
+      \item \textbf{Controllo} (\texttt{enforceTrackerLimit}):
+            se l'albero supera \texttt{maxByteSize}, ordina le foglie per
+            \emph{promise} (profondità) e \textbf{disattiva} le meno
+            promettenti finché si rientra nel limite
+      \item \textbf{Potatura observer} (\texttt{pruneLeafObservers}):
+            dopo un tentativo di split non riuscito, rimuove dagli EBST
+            i tagli ormai troppo deboli rispetto al migliore
+    \end{enumerate}
+
+    \column{0.48\linewidth}
+    \begin{alertblock}{Foglia attiva vs.\ inattiva}
+      Una foglia \textbf{inattiva} smette di aggiornare i propri
+      attribute observer (risparmio di RAM), ma continua ad
+      aggiornare statistiche e modello di predizione.
+      Non può più splittare.\\[4pt]
+      Se il budget lo permette, viene \textbf{riattivata}.
+    \end{alertblock}
+
+    \medskip
+    \begin{block}{Opzione \texttt{stopMemManagement}}
+      Se attiva, al superamento del limite si blocca direttamente
+      \texttt{growthAllowed} invece di deattivare foglie: nessun
+      nuovo split viene tentato.
+    \end{block}
+
+    \medskip
+    \textcolor{gray}{\small \texttt{SizeOf} richiede l'agente JVM
+    \texttt{-javaagent:sizeofag.jar}; se assente, il meccanismo è
+    silenziosamente disabilitato.}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Dal drift allo swap: il ciclo in cinque passi}
+  \begin{columns}[T]
+    \column{0.56\linewidth}
+    \begin{enumerate}
+      \item \textbf{Misura l'errore}\
+            Predizione del path principale e aggiornamento di
+            $|y-\hat y|$.
+      \item \textbf{Interroga ADWIN}\
+            Una variazione significativa segnala un possibile drift.
+      \item \textbf{Crea l'alternativa}\
+            Una nuova foglia nasce alla stessa profondità e apprende
+            in parallelo.
+      \item \textbf{Attende evidenza}\
+            Il confronto parte solo quando entrambi gli error tracker
+            superano la soglia minima.
+      \item \textbf{Decide}\
+            Lo z-test produce uno \emph{swap} oppure elimina l'alternativa.
+    \end{enumerate}
+
+    \column{0.40\linewidth}
+    \begin{alertblock}{Ordine degli aggiornamenti}
+      \small
+      L'istanza viene propagata sia all'albero alternativo sia al figlio
+      corrente. I due modelli osservano quindi lo stesso stream dal momento
+      in cui l'alternativa viene creata.
+    \end{alertblock}
+
+    \medskip
+  \end{columns}
+\end{frame}
+
+\begin{frame}[fragile,shrink=5]{Codice: nascita e selezione dell'albero alternativo}
+  \begin{columns}[T]
+    \column{0.48\linewidth}
+    \textbf{1. Rilevazione e creazione}
+\begin{lstlisting}[style=java,basicstyle=\ttfamily\fontsize{6.9}{8.2}\selectfont]
+double err = Math.abs(y - yPred);
+double oldMean = errorTracker.getMean();
+
+driftDetector.update(err);
+errorTracker.update(err, 1.0);
+boolean drift = driftDetector.isDrift();
+
+// Ignore changes while error improves
+if (drift && errorTracker.getMean() < oldMean) {
+  errorTracker = new VarStats();
+  drift = false;
+}
+
+if (drift && alternateTree == null) {
+  errorTracker = new VarStats();
+  alternateTree = tree.newLeaf(null, depth);
+  tree.nAlternateTrees++;
+}
+\end{lstlisting}
+
+    \column{0.48\linewidth}
+    \textbf{2. Z-test e decisione}
+\begin{lstlisting}[style=java,basicstyle=\ttfamily\fontsize{6.9}{8.2}\selectfont]
+double denom = Math.sqrt(
+    altV / altN + curV / curN);
+double z = (denom > 1e-12)
+    ? (altMu - curMu) / denom : 0.0;
+double p = 2.0 * NormalDist.cdf(-Math.abs(z));
+
+if (p <= tree.switchSignificance) {
+  if (altMu < curMu) {
+    // Alternate wins: replace current subtree
+    parent.children.set(parentBranch,
+                        alternateTree);
+    tree.nSwitchAlternateTrees++;
+  } else {
+    // Current subtree wins: discard alternate
+    killNode(alternateTree, tree);
+    alternateTree = null;
+    tree.nPrunedAlternateTrees++;
+  }
+}
+\end{lstlisting}
+  \end{columns}
+
+  \smallskip
+  \centering
+  \footnotesize
+  Il confronto viene eseguito solo quando entrambi gli error tracker
+  superano \texttt{driftWindowThreshold}.
+\end{frame}
+
+\begin{frame}{Compatibilità API: River $\to$ CapyMOA HATR}
+  \vspace{-0.3em}
+  \footnotesize
+  \begin{columns}[T]
+    \column{0.50\linewidth}
+    \begin{tabular}{@{}ll@{\;}c@{}}
+      \toprule
+      \textbf{Parametro River} & \textbf{CapyMOA} & \\
+      \midrule
+      \texttt{grace\_period}            & \texttt{grace\_period}            & \textcolor{adwingreen}{$\checkmark$} \\
+      \texttt{delta}                    & \texttt{split\_confidence}        & \textcolor{adwingreen}{$\checkmark$} \\
+      \texttt{tau}                      & \texttt{tie\_threshold}           & \textcolor{adwingreen}{$\checkmark$} \\
+      \texttt{leaf\_prediction}         & \texttt{leaf\_prediction}         & \textcolor{adwingreen}{$\checkmark$} \\
+      \texttt{model\_selector\_decay}   & \texttt{model\_selector\_decay}   & \textcolor{adwingreen}{$\checkmark$} \\
+      \texttt{bootstrap\_sampling}      & \texttt{bootstrap\_sampling}      & \textcolor{adwingreen}{$\checkmark$} \\
+      \texttt{min\_samples\_split}      & \texttt{min\_samples\_split}      & \textcolor{adwingreen}{$\checkmark$} \\
+      \texttt{drift\_window\_threshold} & \texttt{drift\_window\_threshold} & \textcolor{adwingreen}{$\checkmark$} \\
+      \texttt{switch\_significance}     & \texttt{switch\_significance}     & \textcolor{adwingreen}{$\checkmark$} \\
+      \texttt{max\_depth}               & \texttt{max\_depth}               & \textcolor{adwingreen}{$\checkmark$} \\
+      \texttt{merit\_preprune}          & \texttt{merit\_preprune}          & \textcolor{adwingreen}{$\checkmark$} \\
+      \texttt{remove\_poor\_attrs}      & \texttt{remove\_poor\_attrs}      & \textcolor{adwingreen}{$\checkmark$} \\
+      \texttt{stop\_mem\_management}    & \texttt{stop\_mem\_management}    & \textcolor{adwingreen}{$\checkmark$} \\
+      \texttt{seed}                     & \texttt{random\_seed}             & \textcolor{adwingreen}{$\checkmark$} \\
+      \bottomrule
+    \end{tabular}
+
+    \column{0.47\linewidth}
+    \begin{tabular}{@{}ll@{\;}c@{}}
+      \toprule
+      \textbf{Parametro River} & \textbf{Stato} & \\
+      \midrule
+      \multicolumn{3}{@{}l@{}}{\textit{Hardcoded al default River:}} \\[1pt]
+      \texttt{splitter}        & fisso \texttt{TEBST}      & \textcolor{capyorange}{$\sim$} \\
+      \texttt{drift\_detector} & fisso \texttt{ADWIN}      & \textcolor{capyorange}{$\sim$} \\
+      \texttt{leaf\_model}     & fisso \texttt{Perceptron} & \textcolor{capyorange}{$\sim$} \\
+      \midrule
+      \multicolumn{3}{@{}l@{}}{\textit{Gestito automaticamente:}} \\[1pt]
+      \texttt{nominal\_attrs}  & schema ARFF               & \textcolor{adwingreen}{$\checkmark$} \\
+      \midrule
+      \multicolumn{3}{@{}l@{}}{\textit{Non implementato:}} \\[1pt]
+      \texttt{binary\_split}   & solo \texttt{False}       & \textcolor{driftred}{$\times$} \\
+      \bottomrule
+    \end{tabular}
+
+    \medskip
+    \textcolor{adwingreen}{$\checkmark$}~Opzioni principali esposte nel wrapper.\\
+    \textcolor{capyorange}{$\sim$}~Tre componenti fissati al default River.\\
+    \textcolor{driftred}{$\times$}~Una modalità non-default non implementata.
+
+    \medskip
+    \begin{alertblock}{}
+      \scriptsize
+      La configurazione standard è replicata. L'equivalenza puntuale vale
+      senza bootstrap; con bootstrap si confrontano le metriche aggregate.
+    \end{alertblock}
+  \end{columns}
+\end{frame}
+
+% ============================================================
+\section{Conclusioni}
+% ============================================================
+
+\begin{frame}{Cosa porta questo lavoro}
+  \begin{columns}[T]
+    \column{0.48\linewidth}
+    \begin{block}{1. Un learner nativo}
+      \small
+      HATR entra nell'ecosistema MOA/CapyMOA senza delegare il training
+      a River.
+    \end{block}
+
+    \begin{block}{2. Fedeltà verificabile}
+      \small
+      Nella configurazione deterministica, struttura e predizioni
+      coincidono con River lungo tutto lo stream.
+    \end{block}
+
+    \column{0.48\linewidth}
+    \begin{block}{3. Beneficio prestazionale}
+      \small
+      Nel benchmark il tempo complessivo migliora di circa
+      2.95--7.85$\times$, soprattutto grazie al training nella JVM.
+    \end{block}
+
+    \begin{alertblock}{4. Un confine chiaro}
+      \small
+      Il port replica il percorso standard, ma non rende ancora
+      pluggabili splitter, drift detector e modello di foglia.
+    \end{alertblock}
+  \end{columns}
+
+  \medskip
+  \centering
+  \large
+  \textbf{Risultato: HATR diventa confrontabile con gli altri learner
+  streaming direttamente in CapyMOA.}
+\end{frame}
+
+\begin{frame}{Sviluppi futuri}
+  \begin{columns}[T]
+    \column{0.50\linewidth}
+    \begin{block}{Completamento parametri non-default}
+      \begin{enumerate}\small
+        \item \textbf{\texttt{binary\_split=True}} \\
+              \footnotesize Modificare \texttt{HANominalObserver}
+              per imporre split binari anche su attributi nominali;
+              aggiungere flag \texttt{-B} al learner MOA e
+              parametro nel wrapper Python.
+
+        \medskip
+        \item \textbf{Splitter pluggabile + \texttt{AdaNumMultiwayBranch}} \\
+              \footnotesize Implementare \texttt{AdaNumMultiwayBranchReg}
+              e un \texttt{HAQOObserver} per supportare
+              \texttt{QOSplitter(allow\_multiway\_splits=True)};
+              esporre \texttt{splitter} come opzione MOA.
+
+        \medskip
+        \item \textbf{Leaf model pluggabile} \\
+              \footnotesize Aggiungere supporto per modelli leaf
+              alternativi al \texttt{Perceptron}
+              (es.\ regressione ridge).
+      \end{enumerate}
+    \end{block}
+
+    \column{0.47\linewidth}
+    \begin{block}{Estensioni di architettura}
+      \begin{enumerate}\setcounter{enumi}{3}\small
+        \item \textbf{Drift detector pluggabile} \\
+              \footnotesize Definire un'interfaccia
+              \texttt{HADriftDetector} e supportare detector
+              alternativi ad \adwin{}
+              (es.\ \textsc{eddm}, Page-Hinkley).
+      \end{enumerate}
+    \end{block}
+  \end{columns}
+\end{frame}
+
+\begin{frame}[allowframebreaks]{Riferimenti bibliografici}
+  \begin{thebibliography}{9}
+    \setbeamertemplate{bibliography item}[text]
+
+    \bibitem{Domingos2000}
+    P.~Domingos and G.~Hulten.
+    \newblock Mining high-speed data streams.
+    \newblock \emph{KDD}, 2000.
+
+    \bibitem{Bifet2007}
+    A.~Bifet and R.~Gavaldà.
+    \newblock Learning from time-changing data with adaptive windowing.
+    \newblock \emph{SDM}, 2007.
+
+    \bibitem{Bifet2009}
+    A.~Bifet and R.~Gavaldà.
+    \newblock Adaptive learning from evolving data streams.
+    \newblock \emph{IDA}, 2009.
+
+    \bibitem{Babcock2003}
+    B.~Babcock, M.~Datar, R.~Motwani, and L.~O'Callaghan.
+    \newblock Maintaining variance and k-medians over data stream windows.
+    \newblock \emph{PODS}, 2003.
+
+    \bibitem{Gomes2017}
+    H.~M.~Gomes \emph{et al.}
+    \newblock Adaptive random forests for evolving data stream classification.
+    \newblock \emph{Machine Learning}, 2017.
+
+    \bibitem{Ikonomovska2011}
+    E.~Ikonomovska, J.~Gama, and S.~Dzeroski.
+    \newblock Learning model trees from evolving data streams.
+    \newblock \emph{Data Mining and Knowledge Discovery}, 2011.
+
+    \bibitem{MOA2010}
+    A.~Bifet \emph{et al.}
+    \newblock MOA: Massive Online Analysis.
+    \newblock \emph{JMLR}, 2010.
+
+    \bibitem{CapyMOA2024}
+    C.~Grzenda \emph{et al.}
+    \newblock CapyMOA: A Python library for data stream mining.
+    \newblock \emph{arXiv}, 2024.
+  \end{thebibliography}
+\end{frame}
+
+\begin{frame}
+  \begin{center}
+    \Large\textbf{Grazie per l'attenzione}
+
+    \bigskip
+    \normalsize
+    Codice, notebook e JAR disponibili in:\\
+    \texttt{2025-2026\_Regression-Models-in-CapyMOA/andrea\_zhang/}
+
+    \bigskip
+    \begin{tabular}{ll}
+      Implementazione: & \texttt{implementation/hatr-moa/} \\
+      Wrapper Python:  & \texttt{implementation/hatr\_capymoa/} \\
+      Esperimenti:     & \texttt{experiments/} \\
+      Tutorial:        & \texttt{tutorials/} \\
+    \end{tabular}
+  \end{center}
+\end{frame}
+
+\end{document}

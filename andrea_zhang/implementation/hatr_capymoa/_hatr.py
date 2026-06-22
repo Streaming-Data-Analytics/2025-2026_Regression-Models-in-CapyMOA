@@ -1,5 +1,6 @@
 from typing import Optional
 
+from capymoa._utils import build_cli_str_from_mapping_and_locals
 from capymoa.base import MOARegressor
 from capymoa.stream._stream import Schema
 from moa.classifiers.trees import (
@@ -55,8 +56,6 @@ class HoeffdingAdaptiveTreeRegressor(MOARegressor):
         Enable merit-based pre-pruning.
     adwin_delta :
         Delta parameter for per-node ADWIN detectors.
-    learning_ratio :
-        Learning rate for the perceptron leaf model.
     max_size_mb :
         Memory limit in MB (requires SizeOf agent; silently disabled otherwise).
     memory_estimate_period :
@@ -96,7 +95,6 @@ class HoeffdingAdaptiveTreeRegressor(MOARegressor):
         tebst_digits: int = 1,
         merit_preprune: bool = True,
         adwin_delta: float = 0.002,
-        learning_ratio: float = 0.01,
         max_size_mb: float = 500.0,
         memory_estimate_period: int = 1_000_000,
         stop_mem_management: bool = False,
@@ -110,35 +108,34 @@ class HoeffdingAdaptiveTreeRegressor(MOARegressor):
                 f"Expected one of {list(_LEAF_PREDICTION)}."
             )
 
-        cli = []
-        cli.append(f"-g {grace_period}")
-        cli.append(f"-d {split_confidence}")
-        cli.append(f"-t {tie_threshold}")
-        cli.append(f"-l {_LEAF_PREDICTION[leaf]}")
-        cli.append(f"-e {model_selector_decay}")
-        if bootstrap_sampling:
-            cli.append("-b")
-        cli.append(f"-w {drift_window_threshold}")
-        cli.append(f"-s {switch_significance}")
-        cli.append(f"-m {min_samples_split}")
-        cli.append(f"-D {max_depth if max_depth is not None else -1}")
-        cli.append(f"-z {tebst_digits}")
-        if merit_preprune:
-            cli.append("-p")
-        cli.append(f"-A {adwin_delta}")
-        cli.append(f"-L {learning_ratio}")
-        cli.append(f"-M {max_size_mb}")
-        cli.append(f"-E {memory_estimate_period}")
-        if stop_mem_management:
-            cli.append("-S")
-        if remove_poor_attrs:
-            cli.append("-R")
+        mapping = {
+            "grace_period": "-g",
+            "split_confidence": "-d",
+            "tie_threshold": "-t",
+            "leaf_prediction": "-l",
+            "model_selector_decay": "-e",
+            "bootstrap_sampling": "-b",
+            "drift_window_threshold": "-w",
+            "switch_significance": "-s",
+            "min_samples_split": "-m",
+            "max_depth": "-D",
+            "tebst_digits": "-z",
+            "merit_preprune": "-p",
+            "adwin_delta": "-A",
+            "max_size_mb": "-M",
+            "memory_estimate_period": "-E",
+            "stop_mem_management": "-S",
+            "remove_poor_attrs": "-R",
+        }
+        leaf_prediction = _LEAF_PREDICTION[leaf]
+        max_depth = max_depth if max_depth is not None else -1
+        config_str = build_cli_str_from_mapping_and_locals(mapping, locals())
 
         self.moa_learner = _MOA_HoeffdingAdaptiveTreeRegressor()
 
         super().__init__(
             schema=schema,
-            CLI=" ".join(cli),
+            CLI=config_str,
             random_seed=random_seed,
             moa_learner=self.moa_learner,
         )

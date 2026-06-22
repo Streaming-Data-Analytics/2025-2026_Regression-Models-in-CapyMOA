@@ -100,7 +100,6 @@ def load_electricity_demand(path, max_instances=None):
     import pandas as pd
     data, _ = arff.loadarff(path)
     df = pd.DataFrame(data)
-    # day è categorico ({1..7}) — scipy restituisce byte string, decode esplicito
     for col in df.columns:
         if df[col].dtype == object:
             df[col] = df[col].str.decode('utf-8')
@@ -159,7 +158,6 @@ def build_capy(cfg, schema, base):
         switch_significance=base["switch_significance"],
         min_samples_split=base["min_samples_split"],
         adwin_delta=base["adwin_delta"],
-        learning_ratio=base["learning_ratio"],
         random_seed=base["seed"],
     )
 
